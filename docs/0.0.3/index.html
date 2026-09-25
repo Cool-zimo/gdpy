@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gdpy v0.0.3 · GitHub Drive 桌面版</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+ "Microsoft YaHei",Roboto,sans-serif;background:#0b1120;color:#e5e7eb;
+ line-height:1.65;padding:32px 20px 64px}
+.wrap{max-width:860px;margin:0 auto}
+header{text-align:center;margin-bottom:28px}
+h1{font-size:29px;font-weight:650;letter-spacing:-.4px;margin-bottom:8px}
+h1 .v{color:#34d399}
+.sub{color:#94a3b8;font-size:14px}
+nav{margin-top:16px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+nav a{font-size:13px;color:#94a3b8;text-decoration:none;padding:6px 13px;
+ border:1px solid #1e293b;border-radius:99px;background:#0f172a}
+nav a:hover{color:#e5e7eb;border-color:#334155}
+.banner{margin:0 0 22px;padding:13px 16px;border-radius:11px;font-size:14px;
+ background:#1e293b;border:1px solid #334155;color:#cbd5e1}
+.banner a{color:#7dd3fc}
+.banner.old{background:#2a1f16;border-color:#7c4a1e;color:#fcd9a8}
+.grid{display:grid;gap:14px}
+@media(min-width:680px){.grid{grid-template-columns:repeat(3,1fr)}}
+.card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:19px;
+ display:flex;flex-direction:column}
+.card .ico{font-size:25px;margin-bottom:7px}
+.card h2{font-size:16px;font-weight:600;margin-bottom:3px}
+.card .req{font-size:11.5px;color:#64748b;margin-bottom:11px;line-height:1.5}
+.card .size{font-size:11.5px;color:#475569;margin-bottom:12px}
+.btn{display:block;text-align:center;text-decoration:none;border-radius:9px;
+ padding:9px 11px;font-size:13.5px;font-weight:500;margin-bottom:7px;
+ transition:background .15s}
+.btn.primary{background:#059669;color:#fff}
+.btn.primary:hover{background:#047857}
+.btn.mirror{background:transparent;color:#7dd3fc;border:1px solid #0e7490}
+.btn.mirror:hover{background:#0c4a6e}
+.btn.quark{background:#0ea5e9;color:#fff}
+.btn.quark:hover{background:#0284c7}
+.btn.pending{background:#111827;color:#475569;border:1px dashed #374151;cursor:default}
+.note{margin-top:26px;padding:15px 17px;background:#0f172a;border:1px solid #1e293b;
+ border-radius:11px;font-size:13px;color:#94a3b8}
+.note b{color:#e5e7eb}
+.note+.note{margin-top:11px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #1e293b}
+th{color:#64748b;font-weight:500;font-size:12px}
+td a{color:#7dd3fc;text-decoration:none}
+td.now{color:#34d399;font-weight:600}
+footer{margin-top:34px;text-align:center;color:#475569;font-size:12px;line-height:1.8}
+footer a{color:#64748b}
+code{background:#111827;padding:1px 6px;border-radius:4px;font-size:12px;
+ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#a5b4fc}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+</style></head><body><div class="wrap">
+<header>
+  <h1>gdpy · GitHub Drive <span class="v">v0.0.3</span></h1>
+  <div class="sub">把 GitHub 当网盘用的桌面客户端 · ⚠️ 本版为 Tkinter 界面（旧版）</div>
+  <nav>
+    <a href="/gdpy/">最新版</a>
+    <a href="/gdpy/versions/">全部版本</a>
+    <a href="https://github.com/Cool-zimo/gdpy">源码</a>
+    <a href="https://github.com/Cool-zimo/gdpy/releases">Releases</a>
+  </nav>
+</header>
+<div class="banner old">⚠️ 这是旧版本。最新版 <b>v0.0.5</b> 已发布 —— <a href="/gdpy/">前往下载</a>　·　<a href="/gdpy/versions/">查看全部版本</a></div>
+<div class="grid"><div class="card"><div class="ico">🪟</div><h2>Windows</h2><div class="req">10 及以上，自带 WebView2</div><div class="size">15.1 MB</div><a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Windows-V0.0.3.exe">GitHub 下载</a><a class="btn mirror" href="https://ghproxy.net/https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Windows-V0.0.3.exe">国内镜像 · ghproxy</a><span class="btn pending">夸克网盘 · 待补充</span></div><div class="card"><div class="ico">🍎</div><h2>macOS</h2><div class="req">11 及以上，Apple Silicon / Intel</div><div class="size">13.8 MB</div><a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-macOS-V0.0.3">GitHub 下载</a><a class="btn mirror" href="https://ghproxy.net/https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-macOS-V0.0.3">国内镜像 · ghproxy</a><span class="btn pending">夸克网盘 · 待补充</span></div><div class="card"><div class="ico">🐧</div><h2>Linux</h2><div class="req">需 libwebkit2gtk（GTK 桌面环境）</div><div class="size">25.2 MB</div><a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Linux-V0.0.3">GitHub 下载</a><a class="btn mirror" href="https://ghproxy.net/https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Linux-V0.0.3">国内镜像 · ghproxy</a><span class="btn pending">夸克网盘 · 待补充</span></div></div>
+<div class="note">
+  <b>首次启动的拦截提示是正常的</b><br>
+  Windows 会弹「Windows 已保护你的电脑」→ 点<b>仍要运行</b>；<br>
+  macOS 会提示「身份不明的开发者」→ 右键打开，或到「隐私与安全性」允许。<br>
+  原因：程序没有购买代码签名证书（年费较贵），并非病毒。
+</div>
+<div class="note">
+  <b>下载不动怎么办</b><br>
+  优先用「夸克网盘」（国内 CDN）。没有的话试 ghproxy 镜像，
+  下载后核对大小：Windows 版应为 <b>15.1 MB</b>。<br>
+  两个都不行可以本地构建：源码里有 <code>本地构建_Windows.bat</code>（需 Python）。
+</div>
+<footer>
+  v0.0.3 · 发布于 2026-09-25 · 源码 MIT 开源 · 可执行文件不入库，由 GitHub Actions 编译<br>
+  本页由 <code>tools/gen_site.py</code> 自动生成，请勿手工编辑
+</footer>
+</div></body></html>
