@@ -33,6 +33,10 @@ h2{font-size:17px;margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid 
 .btn.ghost:hover{border-color:var(--acc);color:#a5b4fc}
 .btn.pending{background:#1f2937;color:var(--dim);border:1px dashed #374151;
   cursor:not-allowed;font-size:13px}
+.btn.mirror{background:transparent;color:#7dd3fc;border:1px solid #0e7490;font-size:13px;
+  padding:8px 12px}
+.btn.mirror:hover{background:#0c4a6e;color:#e0f2fe}
+.hint{font-size:11.5px;color:var(--dim);margin:2px 0 8px;line-height:1.5}
 .note{background:#1c1917;border-left:3px solid var(--warn);padding:12px 14px;
   border-radius:0 8px 8px 0;font-size:13.5px;color:#e7e5e4;margin:16px 0}
 .note b{color:var(--warn)}
@@ -64,6 +68,7 @@ footer a:hover{text-decoration:underline}
       <div class="os">🪟 Windows</div>
       <div class="meta">.exe · 15 MB · Win 10 及以上</div>
       <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Windows-V0.0.3.exe">GitHub 下载</a>
+      <a class="btn mirror" href="https://ghproxy.net/https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Windows-V0.0.3.exe">国内镜像 · ghproxy</a>
       <a class="btn ghost" id="qk-win" href="#" onclick="return false">夸克网盘（国内加速）</a>
     </div>
 
@@ -71,6 +76,7 @@ footer a:hover{text-decoration:underline}
       <div class="os">🍎 macOS</div>
       <div class="meta">14 MB · 需右键「打开」</div>
       <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-macOS-V0.0.3">GitHub 下载</a>
+      <a class="btn mirror" href="https://ghproxy.net/https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-macOS-V0.0.3">国内镜像 · ghproxy</a>
       <a class="btn ghost" id="qk-mac" href="#" onclick="return false">夸克网盘（国内加速）</a>
     </div>
 
@@ -78,9 +84,17 @@ footer a:hover{text-decoration:underline}
       <div class="os">🐧 Linux</div>
       <div class="meta">25 MB · x86_64</div>
       <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Linux-V0.0.3">GitHub 下载</a>
+      <a class="btn mirror" href="https://ghproxy.net/https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Linux-V0.0.3">国内镜像 · ghproxy</a>
       <a class="btn ghost" id="qk-lin" href="#" onclick="return false">夸克网盘（国内加速）</a>
     </div>
 
+  </div>
+
+  <div class="note">
+    <b>GitHub 下载打不开？用「国内镜像 · ghproxy」</b><br>
+    镜像走的是第三方加速服务，下载后建议核对文件大小
+    （Windows 版应为 <b>15.1 MB</b>）。
+    两个都不行的话，源码仓库里有一键打包脚本，本地构建即可。
   </div>
 
   <div class="note">
@@ -161,7 +175,8 @@ footer a:hover{text-decoration:underline}
   <footer>
     源码： <a href="https://github.com/Cool-zimo/gdpy">Cool-zimo/gdpy</a> ·
     全部版本： <a href="https://github.com/Cool-zimo/gdpy/releases">Releases</a><br>
-    可执行文件不入库（体积太大），由 GitHub Actions 编译。
+    可执行文件不入库（体积太大），由 GitHub Actions 编译。<br>
+    下载困难时可用仓库里的 <code>本地构建_Windows.bat</code> 自己打包（需 Python）。
   </footer>
 
 </div>
