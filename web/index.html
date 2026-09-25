@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Drive - Virtual File System based on GitHub</title>
+    <!-- 品牌图标：用真实 PNG 而非 emoji，避免各浏览器字形不一致 -->
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/icon-drive-32.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-drive-192.png">
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+    <script>
+    // 分支切换：检测自定义分支，动态加载资源（使用 jsdelivr CDN 加速）
+    (function() {
+        var customBranch = localStorage.getItem('gd_custom_branch');
+        var urlParams = new URLSearchParams(window.location.search);
+        var urlBranch = urlParams.get('branch');
+        
+        if (urlBranch) {
+            customBranch = urlBranch;
+            localStorage.setItem('gd_custom_branch', urlBranch);
+        }
+        
+        if (customBranch && customBranch !== 'main') {
+            window.__CUSTOM_BRANCH__ = customBranch;
+            // 使用 jsdelivr CDN，国内访问更快，支持指定分支
+            var baseUrl = 'https://cdn.jsdelivr.net/gh/Cool-zimo/github_drive@' + customBranch + '/';
+            window.__BRANCH_BASE__ = baseUrl;
+            // CSS 从 CDN 加载
+            document.write('<link rel="stylesheet" href="' + baseUrl + 'css/style.css">');
+        } else {
+            document.write('<link rel="stylesheet" href="css/style.css?v=44">');
+        }
+    })();
+    </script>
+</head>
+<body>
+    <!-- 登录页 -->
+    <div id="login-screen" class="login-screen">
+        <div class="login-card">
+            <div class="login-logo"><img src="assets/icon-drive-192.png" alt="GitHub Drive" width="72" height="72"></div>
+            <h1>GitHub Drive</h1>
+            <p class="login-subtitle"><span data-i18n="login.subtitle">Turn your GitHub repo into a private cloud drive</span></p>
+
+            <div class="login-form">
+                <label for="token-input"><span data-i18n="login.tokenLabel">GitHub Personal Access Token</span></label>
+                <input type="password" id="token-input" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+                <p class="token-hint"><span data-i18n="login.tokenHint">需要</span> <code>repo</code> <span data-i18n="login.and">和</span> <code>workflow</code> <span data-i18n="login.permission">权限</span></p>
+                <button id="enter-drive-btn" type="button"><span data-i18n="login.enter">Enter Drive</span></button>
+                <div id="saved-accounts" class="saved-accounts" style="display:none;margin:16px 0;">
+                    <div class="saved-accounts-title" style="font-size:12px;color:#6b7280;margin-bottom:8px;text-align:center;"><span data-i18n="login.savedAccounts">已保存的账号</span></div>
+                    <div id="accounts-list" class="accounts-list"></div>
+                    <div class="login-divider" style="margin:16px 0;"><span data-i18n="login.or">OR</span></div>
+                </div>
+                <div id="bridge-box" class="bridge-box" style="display:none">
+                    <div class="bridge-title">🔗 <span data-i18n="bridge.detected">检测到仓鼠已登录</span></div>
+                    <div id="bridge-info" class="bridge-info">
+                        <span id="bridge-who"></span>
+                        <span class="bridge-note" data-i18n="bridge.note">仓鼠 · 令牌只在你本机浏览器里，不会上传</span>
+                    </div>
+                    <button id="bridge-btn" class="bridge-btn" type="button"><span data-i18n="bridge.useIt">沿用该账号，免输入进入</span></button>
+                </div>
+                <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=GitHub+Drive" target="_blank" class="token-link"><span data-i18n="login.noToken">No Token? Click here to create →</span></a>
+            </div>
+            <div class="login-version" id="login-version" style="text-align:center;margin-top:16px;font-size:12px;color:#6b7280;">
+                加载版本中...
+            </div>
+        </div>
+    </div>
+    <script>
+    // 与仓鼠联动：对方已登录则显示"沿用账号"
+    //
+    // ⚠️ 必须等 Bridge 就绪再执行。
+    // 这段原本是立即执行函数，但它在 document.write 加载 bridge.js
+    // 之前就跑了 —— window.Bridge 恒为 undefined，直接 return，
+    // 于是"沿用账号"的提示框从来没显示过。
+    // 桥接脚本是同步 document.write 加载的，DOMContentLoaded 时必然已就绪。
+    (function() {
+        function setup() {
+            var B = window.Bridge;
+            if (!B || !B.other || !B.other() || !B.otherHasToken()) return;
+            var box = document.getElementById('bridge-box');
+            if (box) box.style.display = '';
+            var u = B.findUser(), o = B.other();
+            // 只填账号名那一段。
+            // 说明文字留给静态的 data-i18n 元素 —— 这样切语言时
+            // I18n.apply() 能一并重翻；若由 JS 写入，
+            // apply() 只重翻 data-i18n，这段就会留在旧语言上。
+            var who = document.getElementById('bridge-who');
+            if (who) {
+                who.innerHTML = o.icon + ' <strong>' +
+                    esc(u && u.login ? u.login : '已登录账号') + '</strong>';
+            }
+            var btn = document.getElementById('bridge-btn');
+            if (btn) btn.addEventListener('click', function() {
+                var t = B.findToken();
+                if (!t) return;
+                var inp = document.getElementById('token-input');
+                if (inp) inp.value = t;
+                document.getElementById('enter-drive-btn')?.click();
+            });
+        }
+        // 账号名来自 localStorage，理论上可信，但仍转义，避免存储被污染时 XSS
+        function esc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', setup);
+        } else {
+            setup();
+        }
+    })();
+    </script>
+    <script>
+    // 登录页显示版本号
+    (function() {
+        fetch('js/version.js?t=' + Date.now())
+            .then(r => r.text())
+            .then(t => {
+                const m = t.match(/VERSION\s*=\s*['"]([^'"]+)['"]/);
+                const m2 = t.match(/version\s*[:=]\s*['"]([^'"]+)['"]/i);
+                const v = m ? m[1] : (m2 ? m2[1] : 'v-');
+                document.getElementById('login-version').textContent = 'GitHub Drive ' + v;
+            })
+            .catch(() => {
+                document.getElementById('login-version').textContent = 'GitHub Drive';
+            });
+    })();
+    </script>
+
+    <!-- 主应用 -->
+    <div id="app" class="app hidden">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <span class="sidebar-logo"><img src="assets/icon-drive-192.png" alt="" width="24" height="24"></span>
+                <span class="sidebar-title">GitHub Drive</span>
+            </div>
+            <nav class="sidebar-nav">
+                <div class="nav-section">
+                    <div class="nav-section-title"><span data-i18n="sidebar.myFiles">My Files</span></div>
+                    <a href="#" class="nav-item" id="dashboard-nav" data-view="dashboard"><span class="nav-icon">📊</span><span>仪表盘</span></a>
+                    <a href="#" class="nav-item active" data-view="all-files">
+                        <span class="nav-icon">🗂️</span>
+                        <span data-i18n="nav.allFiles">全部文件</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="recent">
+                        <span class="nav-icon">🕐</span>
+                        <span data-i18n="nav.recent">最近使用</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="starred">
+                        <span class="nav-icon">⭐</span>
+                        <span data-i18n="nav.starred">收藏</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="trash">
+                        <span class="nav-icon">🗑️</span>
+                        <span data-i18n="nav.trash">回收站</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="shared">
+                        <span class="nav-icon">🔗</span>
+                        <span data-i18n="nav.shared">我的分享</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="explore">
+                        <span class="nav-icon">🌐</span>
+                        <span data-i18n="nav.explore">发现分享</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="plugins">
+                        <span class="nav-icon">🧩</span>
+                        <span data-i18n="nav.plugins">插件广场</span>
+                    </a>
+                </div>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="app-switch-slot" id="app-switch-slot"></div>
+                <div class="user-info" id="user-info" onclick="ui.showAccountSwitcher()" style="cursor:pointer;" title="点击切换账号"></div>
+                <button onclick="ui.showSettings()" style="width:100%;padding:10px 16px;border:none;background:none;cursor:pointer;color:inherit;font-size:13px;text-align:left;display:flex;align-items:center;gap:8px;border-top:1px solid #e5e7eb;">
+                    <span>⚙️</span><span data-i18n="nav.settings">Settings</span>
+                </button>
+                <!-- 隐藏元素，保留ID供JS引用 -->
+                <span id="repo-size-display" style="display:none;">📦 --</span>
+                <span class="app-version" id="app-version" style="display:none;">v-</span>
+            </div>
+        </aside>
+        <div class="sidebar-resizer" id="sidebar-resizer" title="拖动调整侧边栏宽度"></div>
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 顶部工具栏 -->
+            <header class="toolbar">
+                <button class="menu-toggle" id="menu-toggle" aria-label="Menu">☰</button>
+                <div class="breadcrumb" id="breadcrumb"></div>
+                <div class="toolbar-actions">
+                    <div class="search-box">
+                        <input type="text" id="search-input" placeholder="Search files...">
+                    </div>
+                    <button class="btn-secondary" id="adv-search-btn" title="高级筛选"><span>⚙️</span></button>
+                    <button class="btn-secondary" id="folder-tree-btn" title="文件夹导航"><span>🗂️</span></button>
+                    <button class="btn-secondary" id="new-folder-btn" title="New Folder">
+                        <span>📁</span> <span class="btn-text"><span data-i18n="btn.newFolder">New Folder</span></span>
+                    </button>
+                    <button class="btn-secondary" id="upload-btn" title="Upload files/folders">
+                        <span>⬆️</span> <span class="btn-text"><span data-i18n="btn.upload">Upload</span></span>
+                    </button>
+                    <button class="btn-secondary" id="view-toggle-btn" title="Toggle view (grid/list)">
+                        <span id="view-toggle-icon">▦</span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- 文件列表 -->
+            <div class="file-area">
+                <div id="drop-overlay" class="drop-overlay hidden">
+                    <div class="drop-content">
+                        <div class="drop-icon">📥</div>
+                        <p>松开鼠标<span data-i18n="btn.upload">Upload</span>文件</p>
+                    </div>
+                </div>
+                <div id="file-list" class="file-list"></div>
+                <div id="empty-state" class="empty-state hidden">
+                    <div class="empty-icon">📂</div>
+                    <p><span data-i18n="empty.noFiles">No files here yet</span></p>
+                    <p class="empty-hint"><span data-i18n="empty.dragHint">Drag files here, or click "Upload" button above</span></p>
+                </div>
+                <div id="loading-state" class="loading-state hidden">
+                    <div class="spinner"></div>
+                    <p>加载中...</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- 右键菜单 -->
+        <div id="context-menu" class="context-menu hidden">
+            <div class="context-menu-item" data-action="open">📂 <span data-i18n="menu.open">Open</span></div>
+            <div class="context-menu-item" data-action="download">⬇️ <span data-i18n="menu.download">Download</span></div>
+            <div class="context-menu-item" data-action="share">🔗 <span data-i18n="menu.share">Share</span></div>
+            <div class="context-menu-item" data-action="edit">📝 编辑文件</div>
+            <div class="context-menu-item" data-action="history">📜 版本历史</div>
+            <div class="context-menu-item" data-action="tags">🏷️ 标签管理</div>
+            <div class="context-menu-item" data-action="rename">✏️ <span data-i18n="menu.rename">Rename</span></div>
+            <div class="context-menu-item" data-action="move">📋 <span data-i18n="menu.move">Move to...</span></div>
+            <div class="context-menu-item" data-action="copy">📄 <span data-i18n="menu.copy">Copy</span></div>
+            <div class="context-menu-item" data-action="star">⭐ <span data-i18n="menu.star">Star</span></div>
+            <div class="context-menu-divider"></div>
+            <div class="context-menu-item danger" data-action="delete">🗑️ <span data-i18n="menu.delete">Delete</span></div>
+        </div>
+    </div>
+
+    <!-- 模态框容器 -->
+    <div id="modal-container"></div>
+
+    <!-- Toast 通知 -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- 隐藏的文件输入 -->
+    <input type="file" id="file-input" multiple class="hidden">
+    <input type="file" id="folder-input" webkitdirectory directory multiple class="hidden">
+
+    <script>
+    // 根据分支动态加载 JS
+    (function() {
+        var base = window.__BRANCH_BASE__ || '';
+        var v = window.__BRANCH_BASE__ ? '' : '?v=44';
+        var files = ['bridge', 'icons', 'github-api', 'cangshu-link', 'storage', 'file-manager', 'share', 'config-sync', 'ui', 'i18n', 'version', 'app'];
+        files.forEach(function(f) {
+            document.write('<script src="' + base + 'js/' + f + '.js' + v + '"><\/script>');
+        });
+    })();
+    </script>
+    <!-- 统一<span data-i18n="btn.upload">Upload</span>弹窗 -->
+    <div id="upload-modal" class="modal-overlay hidden">
+        <div class="modal upload-modal">
+            <div class="modal-header">
+                <h3>📤 <span data-i18n="btn.upload">Upload</span>文件</h3>
+                <button class="modal-close" onclick="ui.closeUploadModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <!-- 拖拽区域 -->
+                <div id="upload-drop-zone" class="upload-drop-zone">
+                    <div class="upload-drop-icon">📥</div>
+                    <p class="upload-drop-text"><span data-i18n="upload.dropHint">Drag files or folders here</span></p>
+                    <p class="upload-drop-hint">支持同时<span data-i18n="btn.upload">Upload</span>多个文件和文件夹</p>
+                </div>
+                <!-- 选择按钮 -->
+                <div class="upload-actions">
+                    <button class="btn-primary" onclick="document.getElementById('upload-file-input').click()">
+                        📄 <span data-i18n="upload.selectFiles">Select Files</span>
+                    </button>
+                    <button class="btn-secondary" onclick="document.getElementById('upload-folder-input').click()">
+                        📂 <span data-i18n="upload.selectFiles">Select Files</span>夹
+                    </button>
+                    <input type="file" id="upload-file-input" multiple style="display:none;">
+                    <input type="file" id="upload-folder-input" webkitdirectory multiple style="display:none;">
+                </div>
+                <!-- 已<span data-i18n="upload.selectFiles">Select Files</span>列表 -->
+                <div class="upload-file-list-header">
+                    <span><span data-i18n="upload.selected">Selected</span> <span id="upload-file-count">0</span> <span data-i18n="upload.items">items</span></span>
+                    <button class="icon-btn" onclick="ui.clearUploadFiles()" style="padding:2px 8px;"><span data-i18n="upload.clear">Clear</span></button>
+                </div>
+                <div id="upload-file-list" class="upload-file-list">
+                    <div class="upload-file-empty">还没有<span data-i18n="upload.selectFiles">Select Files</span></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="ui.closeUploadModal()"><span data-i18n="btn.cancel">Cancel</span></button>
+                <button class="btn-primary" id="upload-confirm-btn" onclick="ui.confirmUpload()" disabled>开始<span data-i18n="btn.upload">Upload</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 多选操作栏（移动端） -->
+    <div id="multi-select-bar" class="multi-select-bar">
+        <span id="multi-select-count" class="ms-count">0 项已选</span>
+        <div class="ms-actions">
+            <button class="ms-btn" onclick="ui.multiSelectAction('selectAll')">全选</button>
+            <button class="ms-btn" onclick="ui.multiSelectAction('move')">📂 移动</button>
+            <button class="ms-btn" onclick="ui.multiSelectAction('download')">⬇️ <span data-i18n="menu.download">Download</span></button>
+            <button class="ms-btn" onclick="ui.multiSelectAction('delete')">🗑️ <span data-i18n="menu.delete">Delete</span></button>
+            <button class="ms-btn ms-cancel" onclick="ui.exitMultiSelectMode()"><span data-i18n="btn.cancel">Cancel</span></button>
+        </div>
+    </div>
+
+    <!-- 移动端底部导航 -->
+    <div class="mobile-bottom-nav">
+        <div class="mobile-nav-items">
+            <div class="mobile-nav-item active" onclick="app.switchView('files')">
+                <span class="icon">📁</span><span>文件</span>
+            </div>
+            <div class="mobile-nav-item" onclick="app.switchView('recent')">
+                <span class="icon">🕐</span><span>最近</span>
+            </div>
+            <div class="mobile-nav-item" onclick="app.switchView('favorites')">
+                <span class="icon">⭐</span><span>收藏</span>
+            </div>
+            <div class="mobile-nav-item" onclick="app.switchView('plugins')">
+                <span class="icon">🧩</span><span>插件</span>
+            </div>
+            <div class="mobile-nav-item" onclick="app.showDashboard()">
+                <span class="icon">📊</span><span>仪表盘</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

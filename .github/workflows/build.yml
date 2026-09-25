@@ -37,15 +37,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      # macOS 的 Python 需要 Tcl/Tk；ubuntu 需要装 python3-tk
-      - name: 安装 tkinter 系统依赖 (Linux)
+      # pywebview 在 Linux 用 WebKitGTK；Windows 用 WebView2（系统自带）
+      - name: 安装 webview 系统依赖 (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.0-dev libgtk-3-dev
 
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
+          pip install pywebview
           pip install -e .
 
       - name: 解析版本号
@@ -64,8 +67,13 @@ jobs:
         # 只能看到红灯，不知道为什么。日志走 artifact。
         continue-on-error: true
         run: |
-          python tests/test_core.py 2>&1 | tee smoke.log
-          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+          ok=0
+          for t in test_core test_config_sync test_url test_webview; do
+            echo "=== $t ==="
+            python tests/$t.py 2>&1 | tee -a smoke.log
+            [ "${PIPESTATUS[0]}" -ne 0 ] && ok=1
+          done
+          echo "exitcode=$ok" >> $GITHUB_OUTPUT
 
       - name: 上传测试日志（无论如何）
         if: always()
@@ -112,19 +120,25 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # ★ --add-data 必须带 web/（前端资源），否则 exe 起来是白屏
+          #   分隔符 Windows 用 ';'，其它平台用 ':'
+          SEP=":"
+          if [ "$RUNNER_OS" = "Windows" ]; then SEP=";"; fi
           pyinstaller --noconfirm --clean --onefile --windowed \
             --name gdpy \
-            --collect-all tkinter \
+            --add-data "web${SEP}web" \
             --collect-submodules gdrive \
             --hidden-import gdrive.core.api \
             --hidden-import gdrive.core.config \
+            --hidden-import gdrive.core.config_sync \
             --hidden-import gdrive.core.vfs \
             --hidden-import gdrive.core.transfer \
             --hidden-import gdrive.core.share \
             --hidden-import gdrive.core.plugins \
-            --hidden-import gdrive.ui.app \
-            --hidden-import gdrive.ui.plugins_ui \
-            main.py 2>&1 | tee build.log
+            --hidden-import gdrive.webview.bridge \
+            --hidden-import gdrive.webview.server \
+            --exclude-module tkinter \
+            webview_main.py 2>&1 | tee build.log
 
       - name: 回传构建日志
         if: always()

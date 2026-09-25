@@ -69,8 +69,18 @@ BLOCKED_COMMANDS = (
 BLOCKED_PATTERNS = (
     'rm -rf /', 'rm -rf /*', 'rm -fr /', 'rm -rf ~',
     'format ', 'chmod 777', ':(){:', 'dd if=',
-    'curl|', 'wget|',            # 下载即执行
 )
+
+# ★ 下载程序 —— 单独处理"下载即执行"
+#
+#   早期版本在 BLOCKED_PATTERNS 里写了 'curl|' / 'wget|'，
+#   但真实命令是 `curl http://x | sh`（管道两侧有空格），
+#   子串匹配根本匹配不到 —— 这条规则一直是失效的，
+#   直到 test_webview 里加了这条断言才暴露出来。
+#
+#   正确判据：curl/wget 处在"非最后一段"的管道位置。
+#   这样 `curl http://a.com`（单纯下载）仍然放行。
+DOWNLOADERS = ('curl', 'wget')
 
 # 命令分隔符 —— 用于切出"命令位置"
 _SEPS = ('|', ';', '&&', '||', '\n')
@@ -251,19 +261,50 @@ class PluginContext:
                 'stderr': r.stderr.decode('utf-8', 'ignore')}
 
 
-def _is_blocked(cmd):
+def _is_download_pipe(cmd):
+    """下载即执行：curl/wget 后面还接着管道段
+
+    例：curl http://x | sh      → 拦
+        wget -O- http://x | bash → 拦
+        curl http://a.com        → 放行（单纯下载）
+    """
+    segs = (cmd or '').split('|')
+    if len(segs) < 2:
+        return None
+    for i, seg in enumerate(segs[:-1]):
+        toks = seg.strip().lower().split()
+        if not toks:
+            continue
+        # 跳过前导环境变量赋值（FOO=bar curl ...）
+        j = 0
+        while j < len(toks) and '=' in toks[j] and not toks[j].startswith('-'):
+            j += 1
+        if j < len(toks) and toks[j] in DOWNLOADERS:
+            return 'download-pipe(%s)' % toks[j]
+    return None
+
+
+def is_blocked(cmd):
     """返回命中的规则名，未命中返回 None"""
-    low = cmd.lower()
+    low = (cmd or '').lower()
     # 1) 危险参数组合（子串匹配）
     for pat in BLOCKED_PATTERNS:
         if pat in low:
             return pat
-    # 2) 命令名（只在命令位置匹配）
+    # 2) 下载即执行
+    hit = _is_download_pipe(cmd)
+    if hit:
+        return hit
+    # 3) 命令名（只在命令位置匹配）
     for tok in _command_positions(cmd):
         for name in BLOCKED_COMMANDS:
             if tok == name or tok.startswith(name + ' '):
                 return name
     return None
+
+
+# 兼容旧名
+_is_blocked = is_blocked
 
 
 class Plugin:
