@@ -1,0 +1,149 @@
+name: Build Desktop
+
+# 手动触发，可指定版本号；默认读 VERSION 文件
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 0.0.1 / 1.0.0），留空则读 VERSION 文件'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Desktop_Github-Drive-Windows
+            exe: gdpy.exe
+            ext: .exe
+          - os: macos-latest
+            artifact: Desktop_Github-Drive-macOS
+            exe: gdpy
+            ext: ''
+          - os: ubuntu-latest
+            artifact: Desktop_Github-Drive-Linux
+            exe: gdpy
+            ext: ''
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # macOS 的 Python 需要 Tcl/Tk；ubuntu 需要装 python3-tk
+      - name: 安装 tkinter 系统依赖 (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -e .
+
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ]; then V=$(cat VERSION | tr -d ' \n'); fi
+          echo "version=$V" >> $GITHUB_OUTPUT
+          echo "版本号: $V"
+
+      - name: 冒烟测试（纯逻辑，不需要 GUI）
+        run: python tests/test_core.py
+
+      - name: PyInstaller 构建
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed \
+            --name gdpy \
+            --hidden-import gdrive.core.api \
+            --hidden-import gdrive.core.config \
+            --hidden-import gdrive.core.vfs \
+            --hidden-import gdrive.core.transfer \
+            --hidden-import gdrive.core.share \
+            --hidden-import gdrive.core.plugins \
+            --hidden-import gdrive.ui.app \
+            --hidden-import gdrive.ui.plugins_ui \
+            main.py
+
+      - name: 校验产物存在
+        shell: bash
+        run: |
+          EXE="dist/${{ matrix.exe }}"
+          if [ ! -f "$EXE" ]; then
+            echo "::error::构建产物不存在: $EXE"
+            ls -la dist/
+            exit 1
+          fi
+          echo "产物大小: $(du -h "$EXE" | cut -f1)"
+
+      - name: 重命名（带版本号）
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "dist/${{ matrix.exe }}" "out/${{ matrix.artifact }}-V${{ steps.ver.outputs.version }}${{ matrix.ext }}"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-V${{ steps.ver.outputs.version }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        run: |
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ]; then V=$(cat VERSION | tr -d ' \n'); fi
+          echo "version=$V" >> $GITHUB_OUTPUT
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-all
+          merge-multiple: true
+
+      - name: 列出产物
+        run: ls -lh dist-all/
+
+      - name: 创建 Release（草稿）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: gdpy v${{ steps.ver.outputs.version }}
+          draft: true
+          prerelease: ${{ startsWith(steps.ver.outputs.version, '0.') }}
+          files: dist-all/*
+          body: |
+            ## Desktop_Github-Drive v${{ steps.ver.outputs.version }}
+
+            ${{ startsWith(steps.ver.outputs.version, '0.') && '> ⚠️ 测试版，请勿用于重要数据' || '正式版' }}
+
+            ### 下载
+            | 平台 | 文件 |
+            |---|---|
+            | Windows | `Desktop_Github-Drive-Windows-V${{ steps.ver.outputs.version }}.exe` |
+            | macOS | `Desktop_Github-Drive-macOS-V${{ steps.ver.outputs.version }}` |
+            | Linux | `Desktop_Github-Drive-Linux-V${{ steps.ver.outputs.version }}` |
+
+            ### 使用
+            1. 填入 GitHub Personal Access Token（需 repo 权限）
+            2. 令牌只存在本机配置文件，不上传任何服务器
+
+            ### 与网页版的关系
+            数据格式完全兼容：网页版上传的文件，桌面版能直接看到并下载。

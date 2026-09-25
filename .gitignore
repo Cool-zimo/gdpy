@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+out/
+*.egg-info/
+.eggs/
+config.json
+grants.json
+*.spec
+!gdpy.spec
+.DS_Store
