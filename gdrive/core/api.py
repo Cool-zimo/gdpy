@@ -28,6 +28,34 @@ class GitHubError(Exception):
         self.body = body or ''
 
 
+def _ascii_safe(url):
+    """把 URL 里的非 ASCII 字符 percent-encode
+
+    ★ 为什么需要：
+      http.client 发送 request line 时用 **ascii** 编码，
+      URL 里只要有中文（文件名/描述/路径），就会抛：
+        UnicodeEncodeError: 'ascii' codec can't encode characters in position N-M
+
+      这在 Windows 上尤其致命 —— 用户文件名几乎必然含中文，
+      分享/下载直接崩，而且错误信息对用户毫无提示性。
+
+    ★ 为什么只处理非 ASCII：
+      url.isascii() 时原样返回，绝不改动已有 URL ——
+      避免把合法的 %XX 二次编码成 %25XX（那会 404）。
+      只在确实含非 ASCII 时才逐段 quote，把风险降到最低。
+    """
+    if isinstance(url, bytes):
+        return url
+    if url.isascii():
+        return url
+    parts = urllib.parse.urlsplit(url)
+    path = urllib.parse.quote(urllib.parse.unquote(parts.path), safe='/')
+    query = urllib.parse.quote(urllib.parse.unquote(parts.query), safe='=&?/+')
+    frag = urllib.parse.quote(urllib.parse.unquote(parts.fragment), safe='')
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, path, query, frag))
+
+
 class GitHubAPI:
     def __init__(self, token='', timeout=60):
         self.token = token or ''
@@ -37,6 +65,9 @@ class GitHubAPI:
     def _req(self, method, path, data=None, headers=None, raw_url=False,
              accept='application/vnd.github+json'):
         url = path if raw_url else (API + path)
+        # ★ 必须编码非 ASCII —— http.client 用 ascii 编码 request line，
+        #   中文文件名会直接 UnicodeEncodeError
+        url = _ascii_safe(url)
         body = None
         hd = {'Accept': accept, 'User-Agent': 'gdpy'}
         if self.token:
@@ -136,7 +167,10 @@ class GitHubAPI:
 
     def raw(self, owner, repo, path, ref='main'):
         """下载原始字节。分享仓库是公开的，无需 token 也能用"""
-        url = '%s/%s/%s/%s/%s' % (RAW, owner, repo, ref, path)
+        # ★ path 必须 quote —— 这里是唯一一处漏掉的（get_file/put_file
+        #   都有 quote），中文文件名会崩
+        url = '%s/%s/%s/%s/%s' % (RAW, owner, repo, ref,
+                                  urllib.parse.quote(path))
         return self._req('GET', url, raw_url=True, accept='*/*')
 
     # ---------- Git 底层 API ----------

@@ -10,6 +10,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 
 # ★ Windows 默认 GBK，print/异常信息含非 GBK 字符会崩
@@ -119,11 +120,30 @@ class App(tk.Tk):
             try:
                 fn(*args)
             except Exception as e:
-                self.q.put(('error', str(e)))
+                # ★ 完整 traceback 落盘：Windows 弹窗里的文字没法复制，
+                #   光靠 showerror 用户只能截图，排查成本极高
+                path = self._log_error(e)
+                hint = ''
+                if path:
+                    hint = '\n\n（详细信息已写入 %s）' % path
+                self.q.put(('error', str(e) + hint))
             finally:
                 self.q.put(('done', None))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _log_error(self, exc):
+        """把 traceback 写到配置目录，返回路径；失败返回 None"""
+        import traceback
+        try:
+            from ..core.config import app_dir
+            path = os.path.join(app_dir(), 'error.log')
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write('\n===== %s =====\n' % time.strftime('%Y-%m-%d %H:%M:%S'))
+                traceback.print_exc(file=f)
+            return path
+        except Exception:
+            return None
 
     def _pump(self):
         """主线程消费队列 —— 唯一的 UI 更新入口"""
