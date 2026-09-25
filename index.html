@@ -55,7 +55,7 @@ footer a:hover{text-decoration:underline}
 
   <h1>gdpy</h1>
   <div class="sub">GitHub Drive 桌面版 · 用 GitHub 仓库当网盘</div>
-  <div class="badge" id="ver">v0.0.2 · 测试版</div>
+  <div class="badge" id="ver">v0.0.3 · 测试版</div>
 
   <h2>下载</h2>
   <div class="cards">
@@ -63,21 +63,21 @@ footer a:hover{text-decoration:underline}
     <div class="card">
       <div class="os">🪟 Windows</div>
       <div class="meta">.exe · 15 MB · Win 10 及以上</div>
-      <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.2/Desktop_Github-Drive-Windows-V0.0.2.exe">GitHub 下载</a>
+      <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Windows-V0.0.3.exe">GitHub 下载</a>
       <a class="btn ghost" id="qk-win" href="#" onclick="return false">夸克网盘（国内加速）</a>
     </div>
 
     <div class="card">
       <div class="os">🍎 macOS</div>
       <div class="meta">14 MB · 需右键「打开」</div>
-      <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.2/Desktop_Github-Drive-macOS-V0.0.2">GitHub 下载</a>
+      <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-macOS-V0.0.3">GitHub 下载</a>
       <a class="btn ghost" id="qk-mac" href="#" onclick="return false">夸克网盘（国内加速）</a>
     </div>
 
     <div class="card">
       <div class="os">🐧 Linux</div>
       <div class="meta">25 MB · x86_64</div>
-      <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.2/Desktop_Github-Drive-Linux-V0.0.2">GitHub 下载</a>
+      <a class="btn primary" href="https://github.com/Cool-zimo/gdpy/releases/download/v0.0.3/Desktop_Github-Drive-Linux-V0.0.3">GitHub 下载</a>
       <a class="btn ghost" id="qk-lin" href="#" onclick="return false">夸克网盘（国内加速）</a>
     </div>
 
@@ -122,6 +122,14 @@ footer a:hover{text-decoration:underline}
     <tr><td class="k">配置仓</td><td><code>github-drive-config</code>（与网页版共用）</td></tr>
     <tr><td class="k">分享仓</td><td><code>gd-share-{6位hex}</code>（公开 + Pages）</td></tr>
   </table>
+
+  <h2>v0.0.3 新增</h2>
+  <ul>
+    <li><b>面包屑导航</b> —— 路径每一级可点击直接跳，不用反复点「上级」</li>
+    <li>深路径自动折叠（超过 5 级显示 <code>网盘 › … › 末两级</code>）</li>
+    <li>一键复制当前路径</li>
+    <li>修：配置同步字段名与覆盖写入（详见下方）</li>
+  </ul>
 
   <h2>和网页版是同一份数据</h2>
   <p style="font-size:14.5px">
