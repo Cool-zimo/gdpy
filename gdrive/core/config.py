@@ -7,9 +7,13 @@
   Linux    ~/.config/gdpy      （或 $XDG_CONFIG_HOME）
 
 ★ 与 web 版的关系：
-  web 版把 VFS 存 localStorage，并通过 github-drive-config 仓库跨设备同步。
-  本程序直接以「配置仓库」为真实来源，本地 JSON 只是缓存 ——
-  这样在网页版上传的文件，桌面版打开就能看见，反之亦然。
+  跨端同步由 core/config_sync.py 负责（读写 github-drive-config/config.json）。
+  本文件只是**本地缓存**，不是真实来源 —— 不要在这里找同步逻辑。
+
+  ⚠️ 历史 bug：早期版本在 ui/app.py 里直接 put_file({'vfs': ...})，
+  整体覆盖了网页版的 config.json，导致 repos/shares/repoUsage 等字段丢失。
+  且网页版字段名是 fileIndex 不是 vfs，所以根本读不到。
+  现在的规则：同步一律走 ConfigSync.push()（读-改-写），禁止整体覆盖。
 """
 import json
 import os

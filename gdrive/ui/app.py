@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from ..core.api import GitHubAPI, GitHubError
 from ..core.config import Config
+from ..core.config_sync import ConfigSync
 from ..core.share import ShareManager
 from ..core.transfer import Transfer
 from ..core.vfs import DRIVE_HOME, VFS, human_size, join, parent
@@ -41,6 +42,8 @@ class App(tk.Tk):
         self.vfs = VFS(self.cfg.vfs())
         self.transfer = Transfer(self.api, self.cfg, self.vfs)
         self.share = ShareManager(self.api, self.cfg, self.cfg.owner)
+        self.sync = ConfigSync(self.api)
+        self.sync.owner = self.cfg.owner
 
         self.q = queue.Queue()
         self.current = DRIVE_HOME
@@ -169,6 +172,7 @@ class App(tk.Tk):
             self.api = GitHubAPI(tok)
             self.transfer = Transfer(self.api, self.cfg, self.vfs)
             self.share = ShareManager(self.api, self.cfg, self.cfg.owner)
+            self.sync = ConfigSync(self.api)
             win.destroy()
             self._bg(self._bootstrap)
 
@@ -181,47 +185,53 @@ class App(tk.Tk):
         owner = me.get('login', '')
         self.cfg.owner = owner
         self.share.owner = owner
+        self.sync.owner = owner
         self.q.put(('status', '已登录：%s' % owner))
         self.transfer.scan_storage_repos(owner)
         self._pull_vfs()
         self.q.put(('reload', None))
 
     def _pull_vfs(self):
-        """从配置仓库拉 VFS（与网页版共用 github-drive-config）"""
+        """从配置仓库拉 VFS（与网页版共用 github-drive-config）
+
+        ★ 网页版的字段名是 fileIndex，不是 vfs —— 认错就读不到。
+        """
         owner = self.cfg.owner
         if not owner:
             return
         try:
-            data = self.api.get_file(owner, 'github-drive-config', 'config.json')
-            import base64, json
-            raw = base64.b64decode(data.get('content', ''))
-            remote = json.loads(raw.decode('utf-8'))
-            if isinstance(remote, dict) and 'vfs' in remote:
-                self.vfs = VFS(remote['vfs'])
+            got = self.sync.pull()
+            if got['vfs']:
+                self.vfs = VFS(got['vfs'])
                 self.cfg.set_vfs(self.vfs.to_dict())
-        except Exception:
-            pass   # 没有配置仓库就用本地的
+            if got['usage']:
+                # 远端为准（网页版也在记账），但要归一化后再存
+                from ..core.config_sync import denormalize_usage
+                self.cfg.set('repoUsage',
+                             denormalize_usage(got['usage']))
+        except Exception as e:
+            # ★ 不能静默 pass：用户会以为"文件没了"
+            self.q.put(('status', '配置同步读取失败：%s' % e))
 
     def _push_vfs(self):
-        """推 VFS 到配置仓库"""
+        """推 VFS 到配置仓库
+
+        ★ 必须走 ConfigSync.push()（读-改-写），
+          不能整体覆盖 —— 否则网页版的 repos/shares/repoUsage
+          等字段会全部丢失。
+        """
         owner = self.cfg.owner
         if not owner:
             return
-        import base64, json
-        content = json.dumps({'vfs': self.vfs.to_dict()},
-                             ensure_ascii=False).encode('utf-8')
         try:
-            sha = self.api.get_file(owner, 'github-drive-config',
-                                    'config.json').get('sha')
-        except Exception:
-            sha = None
-            try:
-                self.api.create_repo('github-drive-config', private=True,
-                                     description='gdpy 配置（与网页版共用）')
-            except Exception:
-                pass
-        self.api.put_file(owner, 'github-drive-config', 'config.json',
-                          content, '更新 VFS', sha=sha)
+            from ..core.config_sync import normalize_usage
+            self.sync.ensure_repo()
+            self.sync.push(
+                vfs=self.vfs.to_dict(),
+                usage=normalize_usage(self.cfg.get('repoUsage', {})),
+            )
+        except Exception as e:
+            self.q.put(('status', '配置同步写入失败：%s' % e))
 
     # ==================== 浏览 ====================
     def _render_tree(self):
