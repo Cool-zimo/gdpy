@@ -79,12 +79,32 @@ class Handler(SimpleHTTPRequestHandler):
         pass        # 不刷控制台，Windows 下没有控制台可刷
 
 
+def shim_source():
+    """取 shim 内容
+
+    ★ 优先用内嵌数据（shim_data.py），而不是 open('shim.js')。
+
+      打包后 gdrive/webview/shim.js 不会出现在 exe 里 ——
+      PyInstaller 只收集 .py，.js 需要显式 --add-data。
+      V0.0.4 就是漏了这一条，表现为启动即 WinError 2 崩溃。
+      内嵌之后这个问题从根上消失。
+
+      仍然保留读外部文件的分支：开发时改了 shim.js 还没重跑
+      gen_shim_data.py，能用上最新内容。
+    """
+    try:
+        from .shim_data import shim_bytes
+        return shim_bytes()
+    except Exception:
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'shim.js'), 'rb') as f:
+            return f.read()
+
+
 def start(web_dir, shim_js=None):
     """启动服务，返回 (url, shutdown_callable)"""
     if shim_js is None:
-        here = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(here, 'shim.js'), 'rb') as f:
-            shim_js = f.read()
+        shim_js = shim_source()
 
     def make(*a, **kw):
         return Handler(*a, directory=web_dir, shim_bytes=shim_js, **kw)

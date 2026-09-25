@@ -116,6 +116,68 @@ if os.path.isfile(os.path.join(WEB, 'index.html')):
 else:
     print('  (跳过：web/ 未同步)')
 
+
+print('\n【8】★ 打包资源自检（V0.0.4 崩在这里）')
+import importlib
+import re as _re
+import shutil as _sh
+
+ROOT8 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHIM_JS = os.path.join(ROOT8, 'gdrive', 'webview', 'shim.js')
+
+# ① shim_data.py 与 shim.js 必须一致（防漂移）
+try:
+    from gdrive.webview import shim_data
+    from gdrive.webview.server import shim_source
+    ck('  shim_data 可导入', True)
+    ck('  ★ shim_data 内容 == shim.js',
+       shim_data.shim_bytes() == open(SHIM_JS, 'rb').read())
+    ck('  shim_source() 有内容', len(shim_source()) > 1000)
+except Exception as e:
+    ck('  shim_data 可导入', False, e)
+
+# ② ★ 模拟打包环境：把 shim.js 移走，一切仍要正常
+#    打包后 gdrive/webview/shim.js 不在 exe 里 —— 这正是 V0.0.4 崩溃的原因
+if os.path.isfile(SHIM_JS):
+    bak = SHIM_JS + '.bak'
+    _sh.move(SHIM_JS, bak)
+    try:
+        ok = True
+        try:
+            n = len(shim_source())
+            ok = n > 1000
+        except Exception as e:
+            ok = False
+            print('      (无外部 shim.js 时失败: %s)' % e)
+        ck('  ★★ 没有 shim.js 仍能取到 shim（打包场景）', ok)
+
+        if os.path.isdir(WEB) and os.path.isfile(os.path.join(WEB, 'index.html')):
+            u8, sd8 = start(WEB)
+            import urllib.request as _u
+            h8 = _u.urlopen(u8, timeout=10).read().decode('utf-8', 'ignore')
+            ck('  ★★ 无 shim.js 时服务仍可启动并注入', SHIM_ROUTE in h8)
+            sd8()
+    finally:
+        _sh.move(bak, SHIM_JS)
+    ck('  shim.js 已还原', os.path.isfile(SHIM_JS))
+
+# ③ 静态检查：workflow 必须把所有非 .py 运行时资源加进 --add-data
+WF = os.path.join(ROOT8, '.github', 'workflows', 'build.yml')
+if os.path.isfile(WF):
+    wf = open(WF, encoding='utf-8').read()
+    need = []
+    for dp, dn, fn in os.walk(os.path.join(ROOT8, 'gdrive')):
+        dn[:] = [d for d in dn if d != '__pycache__']   # 编译产物不算资源
+        for f in fn:
+            if not f.endswith('.py'):
+                need.append(os.path.relpath(os.path.join(dp, f), ROOT8))
+    ck('  gdrive/ 下非 .py 文件: %s' % (need or '无'), True)
+    # shim.js 内嵌后就不需要 add-data 了，但 web/ 必须要
+    ck('  ★ workflow 已 --add-data web/', '--add-data' in wf and 'web' in wf)
+    # 若存在未内嵌又未 add-data 的非 py 资源，报警
+    missing = [x for x in need if 'shim.js' not in x and x not in wf]
+    ck('  ★ 没有遗漏的非 .py 运行时资源', not missing, missing)
+
 print('\n' + '='*46)
 print('  %d 通过 / %d 失败' % (passed, failed))
 print('='*46)
