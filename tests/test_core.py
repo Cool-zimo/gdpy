@@ -154,6 +154,45 @@ ck('base36 与 JS 同形（字符集）',
    all(c in '0123456789abcdefghijklmnopqrstuvwxyz' for c in _b36(123456789)))
 ck('0 的边界', _b36(0) == '0')
 
+
+print('\n【16】面包屑路径切分')
+from gdrive.core.vfs import breadcrumb_segments, shorten, ROOT_LABEL, ELLIPSIS
+
+ck('根显示为「网盘」不是 drive_home',
+   breadcrumb_segments('/drive_home') == [('网盘', '/drive_home')])
+ck('★ 根标签不含内部实现名',
+   'drive_home' not in breadcrumb_segments('/drive_home')[0][0])
+
+s2 = breadcrumb_segments('/drive_home/a/b')
+ck('两级路径', [x[0] for x in s2] == ['网盘', 'a', 'b'])
+ck('★ 每级都带完整可跳转路径',
+   [x[1] for x in s2] == ['/drive_home', '/drive_home/a', '/drive_home/a/b'])
+
+# 深路径折叠
+s6 = breadcrumb_segments('/drive_home/a/b/c/d/e/f')
+ck('深路径被折叠', len(s6) == 5, s6)
+ck('★ 折叠项路径为 None（不可点击）',
+   s6[1] == (ELLIPSIS, None))
+ck('折叠后末尾仍可跳转', s6[-1][1] == '/drive_home/a/b/c/d/e/f')
+ck('★ 折叠不超过上限', len(breadcrumb_segments('/drive_home/' + '/'.join('abcdefghij'), 3)) <= 3)
+
+# 相对路径归一化
+ck('相对路径也能切', breadcrumb_segments('a/b')[0][1] == '/drive_home')
+
+# 每个非折叠项的路径都必须能还原出正确的末段名
+for name, path in breadcrumb_segments('/drive_home/x/y/z'):
+    if path is None:
+        continue
+    ck('  项 %s 路径自洽' % name,
+       path == '/drive_home' or path.split('/')[-1] == name)
+
+print('\n【17】长名截断')
+ck('短名不变', shorten('abc.txt') == 'abc.txt')
+ck('★ 长名被截断', len(shorten('x' * 100)) < 100)
+ck('★ 保留后缀', shorten('averyveryverylongname.txt').endswith('.txt'))
+ck('空值安全', shorten('') == '')
+ck('None 安全', shorten(None) == None)
+
 print('\n' + '='*46)
 print('  %d 通过 / %d 失败' % (passed, failed))
 print('='*46)

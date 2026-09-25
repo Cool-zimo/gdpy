@@ -25,7 +25,8 @@ from ..core.config import Config
 from ..core.config_sync import ConfigSync
 from ..core.share import ShareManager
 from ..core.transfer import Transfer
-from ..core.vfs import DRIVE_HOME, VFS, human_size, join, parent
+from ..core.vfs import (DRIVE_HOME, VFS, breadcrumb_segments,
+                       human_size, join, parent, shorten)
 
 POLL_MS = 100
 
@@ -72,8 +73,13 @@ class App(tk.Tk):
         ttk.Button(bar, text='🔄 刷新', command=self.on_refresh).pack(side='left')
         ttk.Button(bar, text='🧩 插件', command=self.on_plugins).pack(side='left', padx=4)
 
-        self.lbl_path = ttk.Label(self, text=DRIVE_HOME, padding=(10, 2))
-        self.lbl_path.pack(fill='x')
+        # 面包屑：每一级可点击跳转
+        crumb_wrap = ttk.Frame(self)
+        crumb_wrap.pack(fill='x', padx=8, pady=(4, 2))
+        self.crumb_bar = ttk.Frame(crumb_wrap)
+        self.crumb_bar.pack(side='left', fill='x', expand=True)
+        ttk.Button(crumb_wrap, text='\u23ce 复制路径',
+                   command=self.on_copy_path).pack(side='right')
 
         # 文件列表
         wrap = ttk.Frame(self)
@@ -234,13 +240,52 @@ class App(tk.Tk):
             self.q.put(('status', '配置同步写入失败：%s' % e))
 
     # ==================== 浏览 ====================
+    def _render_crumbs(self):
+        """渲染面包屑
+
+        ★ 必须整个重建：路径长度会变，复用旧 widget 会留下残影。
+        """
+        for w in self.crumb_bar.winfo_children():
+            w.destroy()
+
+        segs = breadcrumb_segments(self.current)
+        for i, (name, path) in enumerate(segs):
+            if i > 0:
+                ttk.Label(self.crumb_bar, text='\u203a',
+                          foreground='#9aa3b2').pack(side='left', padx=3)
+
+            last = (i == len(segs) - 1)
+            text = shorten(name)
+
+            if path is None or last:
+                # 折叠项(…) 和 当前目录 都不接受跳转
+                lbl = ttk.Label(self.crumb_bar, text=text)
+                if last:
+                    lbl.configure(foreground='#e6e8ee')
+                else:
+                    lbl.configure(foreground='#6b7280')
+            else:
+                lbl = ttk.Label(self.crumb_bar, text=text,
+                                foreground='#6ea8fe', cursor='hand2')
+                # ★ 闭包捕获 —— 必须用默认参数固定住 path，
+                #   否则循环结束后所有项都指向最后一个路径
+                lbl.bind('<Button-1>',
+                         lambda e, pp=path: self._render(pp))
+            lbl.pack(side='left')
+
+    def on_copy_path(self):
+        """复制当前 VFS 路径到剪贴板"""
+        self.clipboard_clear()
+        self.clipboard_append(self.current)
+        self.status.config(text='已复制路径：%s' % self.current)
+
     def _render_tree(self):
         self._render(self.current)
 
     def _render(self, path=None):
         if path:
             self.current = path
-        self.lbl_path.config(text=self.current)
+        self._render_crumbs()
         for i in self.tree.get_children():
             self.tree.delete(i)
         for name, p, is_dir, info in self.vfs.children(self.current):

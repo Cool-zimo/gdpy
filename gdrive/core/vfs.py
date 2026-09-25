@@ -248,3 +248,49 @@ def human_size(n):
             return '%.1f %s' % (n, unit)
         n /= 1024.0
     return '%.1f TB' % n
+
+
+# ==================== 面包屑 ====================
+
+# 根不显示 "drive_home" —— 那是内部实现，用户看到的是"网盘"
+ROOT_LABEL = '网盘'
+
+# 超过这个段数就折叠中间部分
+MAX_CRUMBS = 5
+
+ELLIPSIS = '\u2026'   # …
+
+
+def breadcrumb_segments(path, max_items=MAX_CRUMBS):
+    """把 VFS 路径切成面包屑片段
+
+    返回 [(显示名, 完整路径), ...]
+    ★ 折叠项的完整路径是 None —— 表示不可点击，
+      调用方必须判空，否则会跳转到 None。
+    """
+    p = normalize(path)
+    parts = [x for x in p.split('/') if x]
+
+    segs = [(ROOT_LABEL, DRIVE_HOME)]
+    cur = DRIVE_HOME
+    for name in parts[1:]:
+        cur = cur + '/' + name
+        segs.append((name, cur))
+
+    if max_items and len(segs) > max_items:
+        # 保留根 + 末尾若干级，中间折叠
+        tail = max(1, max_items - 2)
+        segs = segs[:1] + [(ELLIPSIS, None)] + segs[-tail:]
+
+    return segs
+
+
+def shorten(name, limit=24):
+    """单段名字过长时截断，保留后缀（文件名后缀往往更重要）"""
+    if not name or len(name) <= limit:
+        return name
+    keep = max(1, limit - len(ELLIPSIS))
+    head = keep * 2 // 3
+    tail = keep - head
+    return name[:head] + ELLIPSIS + (name[-tail:] if tail else '')
+
