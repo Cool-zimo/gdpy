@@ -42,7 +42,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev libgtk-3-dev
+          # ★ Ubuntu 24.04 上包名是 4.1，22.04 及更早是 4.0 —— 只装一个会直接失败，
+          #   表现为"安装依赖"步骤红掉，后续全部 skipped，看不出真正原因
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            || sudo apt-get install -y libwebkit2gtk-4.0-dev libgtk-3-dev
 
       - name: 安装依赖
         run: |
@@ -182,6 +185,8 @@ jobs:
 
   release:
     needs: build
+    # ★ 单个平台构建失败不应该卡住其它两个平台的发布
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
