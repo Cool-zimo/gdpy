@@ -58,7 +58,29 @@ jobs:
           echo "版本号: $V"
 
       - name: 冒烟测试（纯逻辑，不需要 GUI）
-        run: python tests/test_core.py
+        id: smoke
+        shell: bash
+        # continue-on-error：测试挂了也要把日志拿到手，否则在 Windows 上
+        # 只能看到红灯，不知道为什么。日志走 artifact。
+        continue-on-error: true
+        run: |
+          python tests/test_core.py 2>&1 | tee smoke.log
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: 上传测试日志（无论如何）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-log-${{ matrix.os }}
+          path: smoke.log
+          if-no-files-found: ignore
+
+      - name: 测试失败则终止
+        if: steps.smoke.outputs.exitcode != '0'
+        shell: bash
+        run: |
+          echo "::error::冒烟测试失败（exit ${{ steps.smoke.outputs.exitcode }}）"
+          exit 1
 
       - name: PyInstaller 构建
         run: |
