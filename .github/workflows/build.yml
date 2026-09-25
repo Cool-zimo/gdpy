@@ -186,8 +186,13 @@ jobs:
           path: dist-all
           merge-multiple: true
 
-      - name: 列出产物
-        run: ls -lh dist-all/
+      # ★ merge-multiple 会把 smoke-log-* 也下载进来，
+      #   必须清掉，否则日志会被当成 release 附件发布出去
+      - name: 只保留可执行文件
+        run: |
+          cd dist-all
+          rm -f smoke.log *.log
+          ls -lh .
 
       - name: 创建 Release（草稿）
         uses: softprops/action-gh-release@v2
