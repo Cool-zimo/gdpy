@@ -96,10 +96,26 @@ jobs:
           git commit -m "ci logs: ${{ matrix.os }} @ ${{ steps.ver.outputs.version }}" || echo "无变化"
           git push -f origin ci-logs || echo "推送失败（不影响构建）"
 
-      - name: PyInstaller 构建
+      - name: 关闭 Windows Defender 实时扫描
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        # ★ PyInstaller 生成的 exe 常被 Defender 误判为木马并当场删除，
+        #   表现为构建"莫名失败"。把工作目录和临时目录加入排除项。
         run: |
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Temp" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$PWD" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$PWD\dist" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$PWD\build" -ErrorAction SilentlyContinue
+          Write-Host "Defender 排除项已添加"
+
+      - name: PyInstaller 构建
+        shell: bash
+        run: |
+          set -o pipefail
           pyinstaller --noconfirm --clean --onefile --windowed \
             --name gdpy \
+            --collect-all tkinter \
+            --collect-submodules gdrive \
             --hidden-import gdrive.core.api \
             --hidden-import gdrive.core.config \
             --hidden-import gdrive.core.vfs \
@@ -108,7 +124,23 @@ jobs:
             --hidden-import gdrive.core.plugins \
             --hidden-import gdrive.ui.app \
             --hidden-import gdrive.ui.plugins_ui \
-            main.py
+            main.py 2>&1 | tee build.log
+
+      - name: 回传构建日志
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name ci
+          git config user.email ci@example.com
+          git checkout -B ci-logs
+          mkdir -p logs
+          cp smoke.log "logs/${{ matrix.os }}.smoke.log" 2>/dev/null || true
+          cp build.log "logs/${{ matrix.os }}.build.log" 2>/dev/null || true
+          git add -f logs/
+          git commit -m "ci logs: ${{ matrix.os }} @ ${{ steps.ver.outputs.version }}" || echo "无变化"
+          git push -f origin ci-logs || echo "推送失败"
 
       - name: 校验产物存在
         shell: bash
