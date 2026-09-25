@@ -123,23 +123,21 @@ footer a:hover{text-decoration:underline}
     <tr><td class="k">分享仓</td><td><code>gd-share-{6位hex}</code>（公开 + Pages）</td></tr>
   </table>
 
-  <h2>v0.0.3 新增</h2>
-  <ul>
-    <li><b>面包屑导航</b> —— 路径每一级可点击直接跳，不用反复点「上级」</li>
-    <li>深路径自动折叠（超过 5 级显示 <code>网盘 › … › 末两级</code>）</li>
-    <li>一键复制当前路径</li>
-    <li>修：配置同步字段名与覆盖写入（详见下方）</li>
-  </ul>
-
   <h2>和网页版是同一份数据</h2>
   <p style="font-size:14.5px">
     两边共用私有配置仓 <code>github-drive-config</code>，
     网页版传的文件桌面版能看见，反之亦然。
   </p>
   <div class="note">
-    <b>v0.0.1 在这块有 bug，已修</b><br>
+    <b>v0.0.1～0.0.2 在这块有 bug，已修</b><br>
     早期版本整体覆盖写入配置文件，会清掉网页版的仓库列表、分享记录和容量记账；
     且字段名对不上，实际也读不到。<b>0.0.2 起改为「读-改-写」，只更新自己那部分。</b>
+  </div>
+
+  <div class="note">
+    <b>0.0.3 修复：中文文件名导致分享/下载崩溃</b><br>
+    报错是 <code>'ascii' codec can't encode characters</code> ——
+    Windows 上几乎必然遇到。已对所有 URL 做百分号编码。
   </div>
 
   <h2>插件</h2>
