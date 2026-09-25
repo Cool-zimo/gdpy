@@ -130,6 +130,7 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed \
             --name gdpy \
             --add-data "web${SEP}web" \
+            --add-data "plugins${SEP}plugins" \
             --collect-submodules gdrive \
             --hidden-import gdrive.core.api \
             --hidden-import gdrive.core.config \

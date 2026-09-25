@@ -174,9 +174,18 @@ if os.path.isfile(WF):
     ck('  gdrive/ 下非 .py 文件: %s' % (need or '无'), True)
     # shim.js 内嵌后就不需要 add-data 了，但 web/ 必须要
     ck('  ★ workflow 已 --add-data web/', '--add-data' in wf and 'web' in wf)
+    ck('  ★ workflow 已 --add-data plugins/',
+       '--add-data' in wf and 'plugins' in wf)
     # 若存在未内嵌又未 add-data 的非 py 资源，报警
     missing = [x for x in need if 'shim.js' not in x and x not in wf]
     ck('  ★ 没有遗漏的非 .py 运行时资源', not missing, missing)
+    # ★ plugins/ 里全是 .py，但它们是"运行时才 import"的模块 ——
+    #   PyInstaller 静态分析不到，必须靠 --add-data 整目录带进去。
+    #   漏了的话 exe 起来插件列表是空的，而且不报错（最难查的那种）。
+    pdir = os.path.join(ROOT8, 'plugins')
+    if os.path.isdir(pdir):
+        n_p = sum(1 for _, _, fn in os.walk(pdir) for f in fn)
+        ck('  plugins/ 有 %d 个文件，已整目录打包' % n_p, 'plugins' in wf)
 
 print('\n' + '='*46)
 print('  %d 通过 / %d 失败' % (passed, failed))

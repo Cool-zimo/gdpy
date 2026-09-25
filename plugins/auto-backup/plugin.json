@@ -1,0 +1,17 @@
+{
+  "id": "auto-backup",
+  "name": "自动备份本地文件夹",
+  "version": "1.0.0",
+  "author": "Cool-zimo",
+  "repo": "Cool-zimo/gdpy",
+  "description": "定时快照本地文件夹，按 mtime+size 增量挑出变动文件，交给宿主上传；状态存本地，重启不丢",
+  "entry": "main.py",
+  "permissions": ["fs:read", "fs:list", "fs:write"],
+  "params": {
+    "watch_dir": {"type": "dir",   "label": "要备份的文件夹", "required": true},
+    "remote_path": {"type": "text","label": "网盘备份目录", "default": "/backup"},
+    "interval":  {"type": "int",   "label": "检查间隔（秒）", "default": 300},
+    "rounds":    {"type": "int",   "label": "连续检查次数（0=只跑一次）", "default": 1},
+    "exclude":   {"type": "text",  "label": "排除的子目录，逗号分隔", "default": ".git,node_modules,__pycache__"}
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "id": "folder-sync",
+  "name": "本地同步文件夹",
+  "version": "1.0.0",
+  "author": "Cool-zimo",
+  "repo": "Cool-zimo/gdpy",
+  "description": "把本地文件夹与网盘目录做增量同步，支持 上传/下载/双向，默认先出计划再执行",
+  "entry": "main.py",
+  "permissions": ["fs:read", "fs:list", "fs:write"],
+  "params": {
+    "local_dir":  {"type": "dir",  "label": "本地文件夹", "required": true},
+    "remote_path":{"type": "text", "label": "网盘目录",   "default": "/sync"},
+    "direction":  {"type": "enum", "label": "方向", "options": ["push", "pull", "both"], "default": "both"},
+    "delete":     {"type": "bool", "label": "删除对方多余的文件（镜像模式）", "default": false},
+    "dry_run":    {"type": "bool", "label": "仅预览计划，不实际传输", "default": true}
+  }
+}

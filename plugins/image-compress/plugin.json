@@ -1,0 +1,16 @@
+{
+  "id": "image-compress",
+  "name": "图片压缩",
+  "version": "1.0.0",
+  "author": "Cool-zimo",
+  "repo": "Cool-zimo/gdpy",
+  "description": "PNG 用标准库无损重压（必定可用）；JPEG/WebP 调用本机 cwebp / ffmpeg / ImageMagick",
+  "entry": "main.py",
+  "permissions": ["fs:read", "fs:list", "fs:write", "exec"],
+  "params": {
+    "input":   {"type": "path", "label": "图片文件或文件夹", "required": true},
+    "output":  {"type": "dir",  "label": "输出目录（留空则原地覆盖）", "default": ""},
+    "quality": {"type": "int",  "label": "JPEG/WebP 质量 1-100", "default": 82},
+    "recursive": {"type": "bool", "label": "包含子文件夹", "default": true}
+  }
+}

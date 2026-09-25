@@ -1,0 +1,15 @@
+{
+  "id": "markdown-preview",
+  "name": "Markdown 预览",
+  "version": "1.0.0",
+  "author": "Cool-zimo",
+  "repo": "Cool-zimo/gdpy",
+  "description": "把 .md 渲染成独立 HTML（标题/列表/表格/代码块/行内公式），可保存或直接交给宿主显示",
+  "entry": "main.py",
+  "permissions": ["fs:read", "fs:list", "fs:write"],
+  "params": {
+    "input":  {"type": "file", "label": "Markdown 文件", "required": true},
+    "output": {"type": "text", "label": "输出 HTML 路径（留空则不落盘）", "default": ""},
+    "title":  {"type": "text", "label": "页面标题（留空用文件名）", "default": ""}
+  }
+}

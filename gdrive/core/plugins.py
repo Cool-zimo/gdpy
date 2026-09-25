@@ -37,6 +37,7 @@ RISK = {
 OFFICIAL_REPOS = (
     'Cool-zimo/github_drive_plugins',
     'Cool-zimo/gdpy-plugins',
+    'Cool-zimo/gdpy',          # 内置插件随主程序分发
 )
 
 DISCLAIMER_VERSION = 1
@@ -214,9 +215,47 @@ class PluginContext:
       这是防冒充的关键。绝不能让插件上报自己的 ID。
     """
 
-    def __init__(self, plugin_id, grants):
+    def __init__(self, plugin_id, grants, params=None):
         self.plugin_id = plugin_id
         self._grants = grants
+        # 插件参数（由调用方传入）。约定为 dict，读不到键时用 .get() 取默认
+        self.params = params or {}
+        # 日志收集：插件不用自己 print，UI 侧拿不到
+        self.logs = []
+        # 进度：0.0 ~ 1.0，UI 侧可选显示
+        self.progress_value = 0.0
+        self.progress_text = ''
+
+    def log(self, msg):
+        """记一行日志（同时写进 error.log，方便排查）"""
+        line = str(msg)
+        self.logs.append(line)
+        try:
+            from ..util.log import elog
+            elog('[plugin:%s] %s' % (self.plugin_id, line))
+        except Exception:
+            pass
+        return line
+
+    def progress(self, value, text=''):
+        """上报进度。value 为 0.0~1.0"""
+        try:
+            self.progress_value = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            self.progress_value = 0.0
+        self.progress_text = str(text or '')
+
+    def param(self, key, default=None):
+        return self.params.get(key, default)
+
+    def require(self, perm):
+        """显式声明要用的权限 —— 没授权就在这里炸，而不是用到一半才炸
+
+        用于那些不走 read_file/write_file/exec 封装、
+        直接 open() 的场景（比如只读文件头、流式拷贝大文件）。
+        """
+        self._grants.check(self.plugin_id, perm)
+        return True
 
     # ---- 文件 ----
     def read_file(self, path):
@@ -405,9 +444,29 @@ class PluginManager:
         self.grants.grant(plugin.id, known)
         return known
 
-    def run(self, pid):
+    def run(self, pid, params=None):
+        """执行插件
+
+        返回统一结构，方便 UI 展示：
+            {'ok': True,  'result': 插件返回值, 'logs': [...], 'error': None}
+            {'ok': False, 'result': None,       'logs': [...], 'error': '...'}
+
+        ★ 插件抛异常不往外抛 —— UI 弹窗看不到 traceback，
+          把消息收进 error 字段，日志留 ctx.logs。
+        """
         plugin = self._plugins.get(pid)
         if plugin is None:
             raise RuntimeError('插件不存在：%s' % pid)
-        ctx = PluginContext(pid, self.grants)
-        return plugin.run(ctx)
+        ctx = PluginContext(pid, self.grants, params)
+        try:
+            r = plugin.run(ctx)
+            return {'ok': True, 'result': r, 'logs': ctx.logs, 'error': None}
+        except PermissionError as e:
+            # 权限/安全策略拦截 —— 单独归类，UI 可以提示"去设置里授权"
+            return {'ok': False, 'result': None, 'logs': ctx.logs,
+                    'error': str(e), 'denied': True}
+        except Exception as e:
+            import traceback
+            ctx.log(traceback.format_exc())
+            return {'ok': False, 'result': None, 'logs': ctx.logs,
+                    'error': '%s: %s' % (type(e).__name__, e)}
