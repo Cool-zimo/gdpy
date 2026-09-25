@@ -5,6 +5,15 @@ import os
 import sys
 import tempfile
 
+# ★ Windows 上 stdout 被重定向时（CI 就是），Python 会用 locale 编码
+#   （中文环境是 cp936/GBK），而下面的输出含 ✓ ✗ ⚠️ 等符号 →
+#   UnicodeEncodeError 直接崩掉测试。必须强制 UTF-8。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gdrive.core.vfs import VFS, DRIVE_HOME, normalize, parent, basename, join, human_size

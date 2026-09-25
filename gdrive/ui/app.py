@@ -8,8 +8,16 @@ Tkinter 主界面
 """
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
+
+# ★ Windows 默认 GBK，print/异常信息含非 GBK 字符会崩
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from ..core.api import GitHubAPI, GitHubError
