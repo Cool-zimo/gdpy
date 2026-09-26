@@ -16,7 +16,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from gdrive.core.contract import DRIVE_HOME, human_size, _b36, is_chunk_dir
+from gdrive.core.contract import DRIVE_HOME, _b36, is_chunk_dir
+from gdrive.core.textutil import (human_size, breadcrumb_segments, shorten,
+                                  ROOT_LABEL, ELLIPSIS)
 from gdrive.core.plugins import (GrantStore, normalize_perms, is_official,
                                  RISK, PermissionError, _is_blocked)
 
@@ -102,6 +104,37 @@ ck('★ 不是分片目录: 普通名', not is_chunk_dir('photos'))
 ck('★ 不是分片目录: mt 后含非法字符', not is_chunk_dir('mtABC-1'))
 ck('★ 不是分片目录: 太短', not is_chunk_dir('mt'))
 ck('DRIVE_HOME 契约', DRIVE_HOME == '/drive_home')
+
+# ★ 下面三段一度被误删：删 vfs.py 时以为 breadcrumb_segments / shorten
+#   也随之下线了。实际上它们早被抽到 core/textutil.py（活代码，
+#   tools/maintain_cli.py 在用 human_size）。
+#   教训：删测试前必须确认被删的**函数**还活着，不能只看模块在不在。
+
+print('\n【16】面包屑路径切分')
+ck('根显示为「网盘」不是 drive_home',
+   breadcrumb_segments('/drive_home') == [('网盘', '/drive_home')])
+ck('★ 根标签不含内部实现名',
+   'drive_home' not in breadcrumb_segments('/drive_home')[0][0])
+s2 = breadcrumb_segments('/drive_home/a/b')
+ck('两级路径', [x[0] for x in s2] == ['网盘', 'a', 'b'])
+ck('★ 每级都带完整可跳转路径',
+   [x[1] for x in s2] == ['/drive_home', '/drive_home/a', '/drive_home/a/b'])
+s6 = breadcrumb_segments('/drive_home/a/b/c/d/e/f')
+ck('深路径被折叠', len(s6) == 5, s6)
+ck('★ 折叠项路径为 None（不可点击）', s6[1] == (ELLIPSIS, None))
+ck('折叠后末尾仍可跳转', s6[-1][1] == '/drive_home/a/b/c/d/e/f')
+ck('★ 折叠不超过上限',
+   len(breadcrumb_segments('/drive_home/' + '/'.join('abcdefghij'), 3)) <= 3)
+ck('相对路径也能切', breadcrumb_segments('a/b')[0][1] == '/drive_home')
+for name, path in breadcrumb_segments('/drive_home/x/y/z'):
+    if path is None:
+        continue
+    ck('  项 %s 路径自洽' % name,
+       path == '/drive_home' or path.split('/')[-1] == name)
+
+print('\n【17】长名截断')
+ck('短名不变', shorten('abc.txt') == 'abc.txt')
+ck('None 安全', shorten(None) is None)
 print('\n【18】★ 版本号三处一致（防漂移）')
 # ★ 历史 bug：VERSION 文件停在 0.0.1 而实际已发布到 0.0.7；
 #   后来又发现 __init__._FALLBACK 停在 0.0.7 而 VERSION 已是 0.0.8。

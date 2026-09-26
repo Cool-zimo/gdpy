@@ -20,33 +20,22 @@ import os
 import sys
 import threading
 
-DEFAULT_CHUNK = 512 * 1024
-DEFAULT_MIN_CHUNK = 10 * 1024 * 1024
-DEFAULT_MAX_REPO = 900 * 1024 * 1024
-
-# ★ 与 web 版线上 config.json 实测值对齐（不是 storage.js 的代码默认值）
+# ★★ 这里**故意不定义**任何业务默认值
 #
-#   线上真实值（2026-09-26 拉 github-drive-config 实测）:
-#     chunkSize    = 524288      (512 KB)
-#     minChunkSize = 10485760    (10 MB)   ←★
+#   曾经这里有一整套 DEFAULT_STORAGE_CONFIG（chunkSize / minChunkSize /
+#   maxRepoSize…），是"契约的 Python 副本"。为此付过代价：
 #
-#   js/storage.js 的 getStorageConfig() 里两个都写 512KB，那是**代码默认**，
-#   用户第一次保存设置后就被真实值覆盖了。**别照抄 js 默认值**。
+#     minChunkSize 差 20 倍 —— Python 写 512KB，线上真实值是 10MB
+#     （用户在网页版保存设置时写进 config.json 的）。
+#     桌面版一写回 config.json，就把用户的分片策略改掉了。
 #
-#   差 20 倍的后果：minChunkSize 决定"多大的文件才分片"。
-#   线上 10MB 意味着 512KB~10MB 的文件都是单片；桌面版若用 512KB，
-#   这批文件会被切成 2~20 片 —— 与既有文件形态不一致，且多吃 20 倍 API 配额。
-DEFAULT_STORAGE_CONFIG = {
-    'maxRepoSize': DEFAULT_MAX_REPO,
-    'autoCreateRepo': True,
-    'repoNamePrefix': 'drive-storage',
-    'warnThreshold': 0.8,
-    'chunkSize': DEFAULT_CHUNK,
-    'minChunkSize': DEFAULT_MIN_CHUNK,
-    'configVersion': 2,
-}
-
-# ★ 桌面版禁止写入的字段
+#   教训：**Python 不该持有"应该是什么"的意见，只该读取"现在是什么"。**
+#
+#   → 需要契约值时从线上 config.json 读（core/config_sync.py）
+#   → 读不到就报错，绝不用本地默认值兜底
+#   → 纯格式约定（路径前缀 / base36 编码）在 core/contract.py
+#
+# ★ 桌面版禁止写入的远端字段
 #
 #   storageConfig 是**网页版用户的既有设置**（含用户自己调过的分片策略）。
 #   桌面版改它 = 改掉用户的选择，且没有任何提示。
@@ -54,13 +43,9 @@ DEFAULT_STORAGE_CONFIG = {
 #   现在虽然改成读-改-写，但仍有"写全量 storageConfig"的路径，必须封死。
 READONLY_CONFIG_KEYS = ('storageConfig',)
 
-# 旧版本遗留的 chunkSize 值 —— 命中就迁移到 512KB
-# （与 web 版 storage.js 的迁移分支一一对应）
-LEGACY_CHUNK_SIZES = (
-    50 * 1024 * 1024,
-    20 * 1024 * 1024,
-    5 * 1024 * 1024,
-)
+#   ★ 想往这个文件里加 DEFAULT_ 常量时，先问：
+#     这个值线上是多少？我在定义它，还是在读取它？
+#     如果是定义 —— 那就是在制造下一处漂移。
 
 
 def app_dir():
@@ -161,36 +146,13 @@ class Config:
         self.set('accounts', accs)
         self.save()
 
-    # ---------- 存储配置 ----------
-    def storage_config(self):
-        saved = self.get('storageConfig')
-        cfg = dict(DEFAULT_STORAGE_CONFIG)
-        if isinstance(saved, dict):
-            cfg.update(saved)
-        # ★ 迁移：旧 chunkSize 一律拉回 512KB
-        if cfg.get('chunkSize') in LEGACY_CHUNK_SIZES:
-            cfg['chunkSize'] = DEFAULT_CHUNK
-        # 补齐缺失字段
-        for k, v in DEFAULT_STORAGE_CONFIG.items():
-            if cfg.get(k) is None:
-                cfg[k] = v
-        return cfg
-
-    def set_storage_config(self, cfg):
-        """★ 只允许改本地缓存，禁止同步回远端
-
-        远端 storageConfig 归网页版所有（用户在网页上调过分片策略）。
-        桌面版若写回去，会静默改掉用户设置 —— 见 READONLY_CONFIG_KEYS。
-        """
-        if not isinstance(cfg, dict):
-            raise ValueError('storageConfig 必须是 dict')
-        # 本地只保留已知键，避免把脏数据带进后续计算
-        clean = {k: v for k, v in cfg.items()
-                 if k in DEFAULT_STORAGE_CONFIG}
-        merged = dict(DEFAULT_STORAGE_CONFIG)
-        merged.update(clean)
-        self.set('storageConfig', merged)
-        self.save()
+    # ★ 曾经这里有 storage_config() / set_storage_config()，
+    #   会用 DEFAULT_STORAGE_CONFIG 补齐默认值、做 chunkSize 迁移。
+    #   那是"契约副本"的藏身处：Python 在这里定义了"分片策略应该是什么"。
+    #   已删除 —— 无人调用，且语义错误（远端 storageConfig 归网页版所有）。
+    #
+    #   现在要读分片策略：从线上 config.json 读（config_sync 读-改-写）。
+    #   要写：不写（READONLY_CONFIG_KEYS 封死）。
 
     def writable_config_keys(self):
         """可同步回远端的字段白名单 —— 不含 READONLY_CONFIG_KEYS"""
