@@ -48,12 +48,24 @@ def _ascii_safe(url):
         return url
     if url.isascii():
         return url
-    parts = urllib.parse.urlsplit(url)
-    path = urllib.parse.quote(urllib.parse.unquote(parts.path), safe='/')
-    query = urllib.parse.quote(urllib.parse.unquote(parts.query), safe='=&?/+')
-    frag = urllib.parse.quote(urllib.parse.unquote(parts.fragment), safe='')
-    return urllib.parse.urlunsplit(
-        (parts.scheme, parts.netloc, path, query, frag))
+
+    # ★★ 只编码非 ASCII 字符，绝不 unquote 已有内容。
+    #
+    #   早期这里是 quote(unquote(path)) —— 想处理"部分已编码"的情况，
+    #   但 unquote 会把 %2F 解成真正的 '/'，再 quote 时 safe='/' 又保留它，
+    #   于是路径**结构被改变**了：
+    #       '/x/报告%2Fb.txt'  →  '/x/%E6%8A%A5%E5%91%8A/b.txt'
+    #   本来是一个文件名，变成了两级路径。
+    #
+    #   只在含非 ASCII 时才走这里（上面已 return），
+    #   逐字符编码可以完全保持原有结构不变。
+    out = []
+    for ch in url:
+        if ord(ch) < 128:
+            out.append(ch)
+        else:
+            out.append(urllib.parse.quote(ch, safe=''))
+    return ''.join(out)
 
 
 class GitHubAPI:

@@ -47,10 +47,23 @@ class Transfer:
         """
         scfg = self.cfg.storage_config()
         usage = self.cfg.usage()
+        cap = scfg['maxRepoSize'] * scfg['warnThreshold']
+
+        # ★ 必须先判断"单块本身就超限"。
+        #   少了这一步：上传一个 500MB 文件（单仓上限 100MB）时，
+        #   循环永远找不到"有空间"的仓库，于是**每个分片都新建一个仓库** ——
+        #   512KB 分片 × 1000 片 = 1000 次 create_repo API，仓库被刷爆。
+        #   而且新建的仓库同样装不下，问题并不会被解决，只是被放大。
+        if need_bytes > cap:
+            raise RuntimeError(
+                '单个分块 %s 超过仓库容量上限 %s，无法上传。'
+                '请调大 storageConfig.maxRepoSize'
+                % (human_size(need_bytes), human_size(int(cap))))
+
         for r in self.cfg.repos():
             key = '%s/%s' % (r['owner'], r['repo'])
             used = usage.get(key, 0)
-            if used + need_bytes <= scfg['maxRepoSize'] * scfg['warnThreshold']:
+            if used + need_bytes <= cap:
                 return r
         if not scfg.get('autoCreateRepo', True):
             raise RuntimeError('所有仓库容量不足，且未开启自动创建仓库')
@@ -155,7 +168,9 @@ class Transfer:
                     chunks.append({'owner': repo['owner'], 'repo': repo['repo'],
                                    'path': cpath, 'size': len(data),
                                    'sha': sha, 'branch': repo['branch']})
-                    uploaded.append((repo, cpath))
+                    # ★ size 必须一起记 —— 回滚时要按它扣回容量，
+                    #   早期版本只存 (repo, cpath)，导致回滚时无从扣减
+                    uploaded.append((repo, cpath, len(data)))
                     self.cfg.add_usage(repo['owner'], repo['repo'], len(data))
 
                     if on_progress:
@@ -178,13 +193,19 @@ class Transfer:
 
     def _rollback(self, uploaded):
         """尽力清理，失败只警告 —— 不能因为清理失败掩盖原始异常"""
-        for repo, cpath in uploaded:
+        for item in uploaded:
+            repo, cpath = item[0], item[1]
+            size = item[2] if len(item) > 2 else 0
             try:
                 self.api.delete_file(repo['owner'], repo['repo'], cpath,
                                      '清理失败上传的分片', branch=repo['branch'])
-                self.cfg.sub_usage(repo['owner'], repo['repo'], 0)
             except Exception:
-                pass
+                # ★ 删除失败就不扣容量 —— 分片还在仓库里，扣了会少算
+                continue
+            # ★★ 早期这里写死传 0，等于完全没回滚。
+            #    后果：上传失败 N 次，记账虚增 N 倍 → 明明有空间却判满
+            #    → 触发上面的"疯狂建仓库"。两个 bug 互相放大。
+            self.cfg.sub_usage(repo['owner'], repo['repo'], size)
         try:
             self.cfg.save()
         except Exception:

