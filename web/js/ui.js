@@ -525,8 +525,13 @@ class UI {
         const container = document.getElementById('breadcrumb');
         container.innerHTML = crumbs.map((crumb, i) => {
             const isLast = i === crumbs.length - 1;
+            // ★ 折叠项 path 是 null —— 不可点击
+            //   不做这个判断的话 data-path 会变成字符串 "null"，
+            //   点击后 setCurrentPath('null') → 跳到一个不存在的路径。
+            const clickable = crumb.path !== null && crumb.path !== undefined;
+            const attrs = clickable ? ' data-path="' + crumb.path + '"' : '';
             return `
-                <span class="breadcrumb-item ${isLast ? 'current' : ''}" data-path="${crumb.path}">
+                <span class="breadcrumb-item ${isLast ? 'current' : ''} ${clickable ? '' : 'breadcrumb-collapsed'}"${attrs}>
                     ${crumb.isRepo ? '📦 ' : ''}${crumb.name}
                 </span>
                 ${!isLast ? '<span class="breadcrumb-separator">/</span>' : ''}
@@ -535,6 +540,8 @@ class UI {
 
         // 绑定点击和拖放
         container.querySelectorAll('.breadcrumb-item').forEach(item => {
+            // ★ 折叠项没有 data-path，跳过
+            if (!item.dataset.path) return;
             item.addEventListener('click', () => {
                 this.app.fileManager.setCurrentPath(item.dataset.path);
                 this.app.loadFiles();
@@ -1282,6 +1289,7 @@ class UI {
             {icon:'⚙️', title:I18n.t('settings.backend'), desc:I18n.t('settings.backendDesc'), action:'ui.closeModal();ui.showBackendManager();'},
 
             {icon:'❓', title:I18n.t('settings.help'), desc:I18n.t('settings.helpDesc'), action:'ui.closeModal();ui.showHelp();'},
+            {icon:'🧹', title:I18n.t('settings.maintain') || '仓库维护', desc:I18n.t('settings.maintainDesc') || '扫描孤儿与幽灵文件', action:'ui.closeModal();ui.showMaintain();'},
             {icon:'📖', title:I18n.t('settings.docs'), desc:I18n.t('settings.docsDesc'), action:"window.open('https://cool-zimo.github.io/github_drive_documentation/','_blank');"},
             {icon:'🔀', title:I18n.t('settings.versionSwitch') || '版本切换', desc:I18n.t('settings.versionSwitchDesc') || '体验他人改进的版本', action:'ui.closeModal();ui.showVersionSwitcher();'},
             {icon:'🔍', title:I18n.t('settings.contentSearch') || '内容搜索', desc:I18n.t('settings.contentSearchDesc') || '搜索时同时匹配文件内容', action:'ui.toggleContentSearch();'},
@@ -1302,6 +1310,135 @@ class UI {
             body += '<div><div style="font-weight:600;font-size:14px;">' + it.title + extraHtml + '</div><div style="font-size:12px;color:#6b7280;">' + it.desc + '</div></div></div>';
         }
         this.showModal(I18n.t('settings.title'), body, '', true);
+    }
+
+    /**
+     * 仓库维护：孤儿/幽灵检测与恢复
+     *
+     * ★ 为什么入口在设置里而不是工具栏：
+     *   这是维护动作，不是日常操作，不该占主界面。
+     */
+    showMaintain() {
+        const body = `
+            <div style="padding:8px 0;">
+                <div style="font-size:13px;color:#6b7280;line-height:1.6;margin-bottom:14px;">
+                    扫描所有存储仓库，找出两类问题：<br>
+                    · <b>孤儿</b>：仓库里有数据，但界面看不见（覆盖上传留下的旧分片）<br>
+                    · <b>幽灵</b>：界面看得见，但数据已丢失（下载必失败）
+                </div>
+                <div id="maintain-result" style="display:none;margin-bottom:14px;"></div>
+                <button id="maintain-scan-btn" class="btn-primary btn-sm"
+                    onclick="ui.runMaintainScan()">
+                    🔍 开始扫描
+                </button>
+            </div>
+        `;
+        this.showModal('🧹 仓库维护', body, '', true);
+    }
+
+    async runMaintainScan() {
+        const btn = document.getElementById('maintain-scan-btn');
+        const box = document.getElementById('maintain-result');
+        if (!btn || !box) return;
+
+        btn.disabled = true;
+        btn.textContent = '扫描中…';
+        box.style.display = 'block';
+        box.innerHTML = '<div style="font-size:13px;color:#6b7280;">正在读取仓库文件树，仓库多时可能较慢…</div>';
+
+        try {
+            const app = this.app;
+            if (!app.maintain) app.maintain = new Maintain(app.api, app.storage);
+            const rep = await app.maintain.scan(function (done, total, label) {
+                box.innerHTML = '<div style="font-size:13px;color:#6b7280;">' +
+                    '扫描中 ' + done + '/' + total + '：' + label + '</div>';
+            });
+            this._maintainReport = rep;
+            box.innerHTML = this.renderMaintainReport(rep);
+            btn.textContent = '重新扫描';
+            btn.disabled = false;
+        } catch (e) {
+            box.innerHTML = '<div style="color:#dc2626;font-size:13px;">扫描失败：' +
+                (e && e.message || e) + '</div>';
+            btn.textContent = '重试';
+            btn.disabled = false;
+        }
+    }
+
+    renderMaintainReport(rep) {
+        const fmt = function (n) {
+            const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let i = 0; n = parseFloat(n || 0);
+            while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+            return (i === 0 ? Math.round(n) : n.toFixed(1)) + ' ' + u[i];
+        };
+        let h = '<div style="font-size:13px;line-height:1.7;">';
+        h += '记录文件 <b>' + (rep.file_count || 0) + '</b> 个，' +
+             '占用 <b>' + fmt(rep.recorded_bytes) + '</b><br>';
+        h += '仓库实际 <b>' + fmt(rep.actual_bytes) + '</b><br>';
+
+        const oc = rep.orphans.length;
+        const gc = rep.ghosts.length;
+        if (oc === 0 && gc === 0) {
+            h += '<div style="color:#059669;margin-top:8px;">✓ 没有发现问题</div>';
+        } else {
+            if (oc) {
+                h += '<div style="color:#d97706;margin-top:8px;">' +
+                     '★ 孤儿 <b>' + oc + '</b> 个 · ' + fmt(rep.orphan_bytes) +
+                     '<br><span style="font-size:12px;color:#6b7280;">' +
+                     '界面看不见但占着容量，可恢复到 _recovered 目录</span></div>';
+            }
+            if (gc) {
+                h += '<div style="color:#dc2626;margin-top:8px;">' +
+                     '★ 幽灵 <b>' + gc + '</b> 个' +
+                     '<br><span style="font-size:12px;color:#6b7280;">' +
+                     '这些文件下载必失败</span></div>';
+            }
+        }
+        if (rep.errors && rep.errors.length) {
+            h += '<div style="color:#dc2626;margin-top:8px;">' +
+                 '扫描出错 ' + rep.errors.length + ' 个仓库</div>';
+        }
+        h += '</div>';
+
+        if (oc) {
+            h += '<button class="btn-primary btn-sm" style="margin-top:12px;" ' +
+                 'onclick="ui.runMaintainRecover()">' +
+                 '♻️ 恢复到 _recovered（' + oc + ' 个）</button>';
+            h += '<div style="font-size:12px;color:#6b7280;margin-top:6px;">' +
+                 '只增不删：重名自动加序号，不会覆盖现有文件</div>';
+        }
+        return h;
+    }
+
+    async runMaintainRecover() {
+        const rep = this._maintainReport;
+        const box = document.getElementById('maintain-result');
+        if (!rep || !box) return;
+        if (!confirm('将 ' + rep.orphans.length + ' 个孤儿恢复到 /drive_home/_recovered。\n\n' +
+                     '只增不删，不会覆盖现有文件。继续？')) return;
+
+        try {
+            const app = this.app;
+            const res = app.maintain.recover(rep.orphans);
+            app.storage.setVFS(res.vfs);
+            // ★ 必须推到远端，否则只在本地生效
+            if (app.configSync && app.configSync.pushConfig) {
+                await app.configSync.pushConfig();
+            }
+            box.innerHTML = '<div style="font-size:13px;line-height:1.7;">' +
+                '<div style="color:#059669;">✓ 恢复完成</div>' +
+                '新增 <b>' + res.added.length + '</b> 个文件<br>' +
+                (res.conflicts.length ? '跳过（已存在）' + res.conflicts.length + ' 个<br>' : '') +
+                (res.skipped.length ? '忽略（隐藏文件/空名）' + res.skipped.length + ' 个<br>' : '') +
+                '<div style="margin-top:8px;color:#6b7280;">' +
+                '请到 /drive_home/_recovered 查看</div></div>';
+            this._maintainReport = null;
+            if (app.loadFiles) app.loadFiles();
+        } catch (e) {
+            box.innerHTML = '<div style="color:#dc2626;font-size:13px;">恢复失败：' +
+                (e && e.message || e) + '</div>';
+        }
     }
 
     showVersionSwitcher() {

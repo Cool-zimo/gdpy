@@ -30,12 +30,25 @@ class FileManager {
     getBreadcrumbs(path = this.currentPath) {
         path = Storage.normalizePath(path);
         const parts = path.substring('/drive_home'.length).split('/').filter(Boolean);
-        const crumbs = [{ name: 'Drive Home', path: '/drive_home' }];
+        // ★ 根显示"网盘" —— 与桌面版 textutil.py 的 ROOT_LABEL 一致。
+        //   drive_home 是内部实现，不该暴露给用户。
+        const crumbs = [{ name: BREADCRUMB_ROOT_LABEL, path: '/drive_home' }];
         let current = '/drive_home';
         parts.forEach(part => {
             current += '/' + part;
-            crumbs.push({ name: part, path: current });
+            // ★ 长名截断：不截断的话深层长目录名会把面包屑撑爆
+            crumbs.push({ name: shortenName(part), path: current });
         });
+
+        // ★ 折叠：超过 BREADCRUMB_MAX 时保留根 + 末尾若干级，中间折叠
+        //   不折叠的话，深路径只能靠横向滚动才能看到当前位置
+        //   （CSS 是 max-width:45% + overflow-x:auto，当前项经常被滚出视野）
+        if (crumbs.length > BREADCRUMB_MAX) {
+            const tail = Math.max(1, BREADCRUMB_MAX - 2);
+            return [crumbs[0],
+                    { name: BREADCRUMB_ELLIPSIS, path: null }]
+                   .concat(crumbs.slice(crumbs.length - tail));
+        }
         return crumbs;
     }
 
@@ -44,6 +57,20 @@ class FileManager {
         const config = this.storage.getStorageConfig();
         const currentUser = this.storage.getUser()?.login;
         let repos = this.storage.getRepos();
+
+        // ★ 分块超过单仓上限时直接报错，不能走进下面的 autoCreateRepo
+        //
+        //   否则 canRepoFit 永远 false → 每个分片都 create_repo。
+        //   500MB 文件 × 512KB 分片 = 上千次 create_repo，
+        //   而且新建的仓库同样装不下 —— 问题没解决只是被放大。
+        //
+        //   ★ 这个保护此前只在桌面版 Python 侧做过（v0.0.9），
+        //     js 侧（线上实际在跑的这份）从来没修 —— 双实现的代价。
+        if (neededSize > config.maxRepoSize) {
+            throw new Error(
+                `单个分块 ${Storage.formatBytes(neededSize)} 超过仓库上限 ` +
+                `${Storage.formatBytes(config.maxRepoSize)}，无法上传`);
+        }
         
         // 关键修复：只选择 owner 和当前用户匹配的仓库，避免访问其他账号的仓库导致 401
         if (currentUser) {
@@ -101,6 +128,18 @@ class FileManager {
         const virtualPath = Storage.normalizePath(targetPath) + '/' + file.name;
         const totalSize = file.size;
         const chunks = [];
+
+        // ★ 覆盖上传会泄漏旧分片（线上实测：56.2MB / 45 个文件因此丢失）
+        //
+        //   成因：每次上传都新建随机目录 `mtrand/filename`，
+        //   VFS 只指向最新那份，旧目录的 blob 从不删除 ——
+        //   save.json 在仓库里累积了 4 份、math_history.json 3 份。
+        //
+        //   所以这里必须先记住旧记录，等新版本写入成功后再清理。
+        //   ★ 顺序不能反：先删旧的、新上传又失败 = 文件彻底没了。
+        const oldFile = this.storage.getFile(virtualPath);
+        const oldChunks = (oldFile && Array.isArray(oldFile.chunks))
+            ? oldFile.chunks.slice() : [];
 
         console.log(`[FileManager] 上传文件: ${file.name}, 大小: ${Storage.formatBytes(totalSize)}`);
 
@@ -213,6 +252,11 @@ class FileManager {
             size: totalSize,
             chunks: chunks
         });
+
+        // ★ 新版本已写入 VFS，此时旧分片才真正成为孤儿，可以安全清理
+        if (oldChunks.length) {
+            await this._cleanupOrphanChunks(oldChunks, virtualPath);
+        }
 
         console.log(`[FileManager] 上传完成: ${virtualPath}, 共 ${chunks.length} 个分片`);
         return { virtualPath, fileInfo, chunks, split: totalChunks > 1 };
@@ -409,6 +453,48 @@ class FileManager {
         return btoa(binary);
     }
 
+    /**
+     * 清理孤儿分片（覆盖上传/删除时遗留）
+     *
+     * ★ 这里**不能抛异常**。调用方（uploadFile）已经成功了，
+     *   因为清理旧分片失败就报"上传失败"是错的 —— 文件明明在。
+     *   失败的分片记进 pendingOrphanChunks，下次有机会再清。
+     */
+    async _cleanupOrphanChunks(chunks, why) {
+        for (const chunk of chunks) {
+            try {
+                let sha = chunk.sha;
+                try {
+                    const fi = await this.api.getFileContents(
+                        chunk.owner, chunk.repo, chunk.path, chunk.branch);
+                    sha = fi.sha || sha;
+                } catch (e) { /* 用记录里的 sha */ }
+
+                if (!sha) {
+                    this._pendingOrphan(chunk, why, '无 sha，跳过');
+                    continue;
+                }
+                await this.api.deleteFile(chunk.owner, chunk.repo, chunk.path,
+                    `清理孤儿分片: ${chunk.path}`, chunk.branch, sha);
+                this.storage.subtractFromRepoUsage?.(
+                    chunk.owner, chunk.repo, chunk.size);
+            } catch (e) {
+                // ★ 不 throw：清理失败不影响主流程，但要留痕
+                this._pendingOrphan(chunk, why, e.message);
+            }
+        }
+    }
+
+    _pendingOrphan(chunk, why, err) {
+        if (!this.pendingOrphanChunks) this.pendingOrphanChunks = [];
+        this.pendingOrphanChunks.push({
+            owner: chunk.owner, repo: chunk.repo, path: chunk.path,
+            size: chunk.size, why: why, error: err,
+            at: new Date().toISOString()
+        });
+        console.warn(`[FileManager] 孤儿分片清理失败（已记入待清理）: ${chunk.path}`, err);
+    }
+
     // ==================== 文件删除 ====================
     async deleteFile(virtualPath) {
         virtualPath = Storage.normalizePath(virtualPath);
@@ -429,7 +515,10 @@ class FileManager {
                 await this.api.deleteFile(chunk.owner, chunk.repo, chunk.path, `删除分片: ${chunk.path}`, chunk.branch, sha);
                 console.log(`[FileManager] 已删除分片 ${i + 1}/${fileInfo.chunks.length}: ${chunk.repo}/${chunk.path}`);
             } catch (e) {
-                console.warn(`[FileManager] 删除分片失败: ${chunk.path}`, e.message);
+                // ★ 原来是纯 console.warn —— 分片静默留下，
+                //   时间一长就变成"界面看不到但占容量"的孤儿数据。
+                //   现在记进 pendingOrphanChunks，可被扫描/重试发现。
+                this._pendingOrphan(chunk, virtualPath, e.message);
             }
         }
 

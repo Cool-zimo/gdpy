@@ -510,6 +510,17 @@ body.resizing {
     color: var(--text-tertiary);
 }
 
+/* 折叠项（中间被省略的层级）：不可点击 */
+.breadcrumb-item.breadcrumb-collapsed {
+    cursor: default;
+    color: var(--text-tertiary);
+    user-select: none;
+}
+.breadcrumb-item.breadcrumb-collapsed:hover {
+    background: transparent;
+    color: var(--text-tertiary);
+}
+
 .toolbar-actions {
     display: flex;
     align-items: center;

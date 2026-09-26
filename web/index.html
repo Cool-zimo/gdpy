@@ -261,8 +261,8 @@
     // 根据分支动态加载 JS
     (function() {
         var base = window.__BRANCH_BASE__ || '';
-        var v = window.__BRANCH_BASE__ ? '' : '?v=44';
-        var files = ['bridge', 'icons', 'github-api', 'cangshu-link', 'storage', 'file-manager', 'share', 'config-sync', 'ui', 'i18n', 'version', 'app'];
+        var v = window.__BRANCH_BASE__ ? '' : '?v=45';
+        var files = ['bridge', 'icons', 'github-api', 'cangshu-link', 'storage', 'maintain', 'file-manager', 'share', 'config-sync', 'ui', 'i18n', 'version', 'app'];
         files.forEach(function(f) {
             document.write('<script src="' + base + 'js/' + f + '.js' + v + '"><\/script>');
         });
