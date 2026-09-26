@@ -150,12 +150,24 @@ class ConfigSync:
         """
         cfg, _ = self._read_raw()
         vfs = None
-        # ★ fileIndex 是 web 版的正式字段名，vfs 是本模块早期的兼容别名
-        for key in ('fileIndex', 'vfs'):
-            cand = cfg.get(key)
-            if isinstance(cand, dict):
-                vfs = cand
-                break
+        # ★★ fileIndex 是唯一真相；vfs 只是"本模块很早期"写过的别名
+        #
+        #   曾经的写法是 `for key in ('fileIndex','vfs'): if cfg.get(key) ...`
+        #   —— 只要 fileIndex 取到 None 就继续看 vfs。
+        #
+        #   危险在于：线上 config 曾同时存在两者，
+        #     fileIndex = 20 个文件（当前真相）
+        #     vfs       = 59 个文件（三个月前的旧快照，其中 39 个分片已删除）
+        #   一旦某次 push 把 fileIndex 写成空/None，pull 会静默回退到那份
+        #   陈旧 vfs —— 39 个文件"看得见但下载必失败"（幽灵文件），
+        #   而且比没有文件更难排查：界面看着一切正常。
+        #
+        #   所以回退条件收紧为「fileIndex 这个键根本不存在」，
+        #   而不是「fileIndex 取不到值」。空 VFS 是合法状态，不该被覆盖。
+        if isinstance(cfg.get('fileIndex'), dict):
+            vfs = cfg['fileIndex']
+        elif 'fileIndex' not in cfg and isinstance(cfg.get('vfs'), dict):
+            vfs = cfg['vfs']      # 只有真正是本模块旧版写的配置才走这条路
         return {
             'vfs': vfs,
             'usage': normalize_usage(cfg.get('repoUsage')),
@@ -183,8 +195,14 @@ class ConfigSync:
             cfg, sha = self._read_raw()
 
             if vfs is not None:
+                # ★ 只写 fileIndex。
+                #   早期版本同时写 fileIndex 和 vfs 两个键，理由是"兼容"。
+                #   实际后果是两份数据必然漂移（见 pull() 里的说明）：
+                #   线上曾出现 fileIndex=20 / vfs=59，差的 39 个全是已删分片。
+                #   vfs 没有任何读取方（web 的 config-sync.js 只读 fileIndex），
+                #   写它只会制造第二个真相源。
                 cfg['fileIndex'] = vfs
-                cfg['vfs'] = vfs            # 兼容别名
+                cfg.pop('vfs', None)        # 顺手清掉历史残留
             if usage is not None:
                 cfg['repoUsage'] = denormalize_usage(usage)
             if repos is not None:

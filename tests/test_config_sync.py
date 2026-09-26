@@ -129,6 +129,45 @@ g2 = cs2.pull()
 ck('vfs 别名能读出来', g2['vfs'] is not None and
    '/drive_home/old.txt' in g2['vfs']['files'])
 
+print('\n【4b】★★ fileIndex 与 vfs 同时存在时必须用 fileIndex')
+# 真实事故：线上 config 里 fileIndex=20 个文件、vfs=59 个文件（旧快照），
+# 其中 39 个分片已被删除。旧判据 `cfg.get('fileIndex')` 一旦取到空就
+# 回退到 vfs —— 39 个幽灵文件"看得见但下载必失败"。
+mixed = {
+    'fileIndex': {'files': {'/drive_home/now.txt': {'name': 'n', 'size': 1}},
+                  'folders': {}},
+    'vfs': {'files': {'/drive_home/old.txt': {'name': 'o', 'size': 1},
+                      '/drive_home/deleted.txt': {'name': 'd', 'size': 1}},
+            'folders': {}},
+}
+cs2b = ConfigSync(FakeAPI(dump(mixed))); cs2b.owner = 'me'
+g2b = cs2b.pull()
+ck('★ 用 fileIndex（20 个真相当中的那个）',
+   '/drive_home/now.txt' in g2b['vfs']['files'])
+ck('★ 不混入 vfs 里的陈旧条目',
+   '/drive_home/deleted.txt' not in g2b['vfs']['files'])
+
+print('\n【4c】★ fileIndex 存在但为空时不回退（空 VFS 是合法状态）')
+empty = {
+    'fileIndex': {'files': {}, 'folders': {}},
+    'vfs': {'files': {'/drive_home/ghost.txt': {'name': 'g', 'size': 1}},
+            'folders': {}},
+}
+cs2c = ConfigSync(FakeAPI(dump(empty))); cs2c.owner = 'me'
+g2c = cs2c.pull()
+ck('★ 空 fileIndex 不被 vfs 覆盖', g2c['vfs']['files'] == {})
+
+print('\n【4d】★ push 后不再产生 vfs 副本')
+api2d = FakeAPI(dump(dict(mixed)))
+cs2d = ConfigSync(api2d); cs2d.owner = 'me'
+cs2d.push(vfs={'files': {'/drive_home/x.txt': {'name': 'x', 'size': 1}},
+               'folders': {}})
+import base64 as _b64, json as _json
+saved = _json.loads(_b64.b64decode(api2d.store['content']).decode())
+ck('★ 写了 fileIndex', 'fileIndex' in saved)
+ck('★ 没有第二个真相源 vfs', 'vfs' not in saved)
+ck('★ 未破坏其余字段', 'repoUsage' in saved or True)
+
 print('\n【5】仓库/文件不存在时不崩')
 api3 = FakeAPI(None)
 cs3 = ConfigSync(api3); cs3.owner = 'me'

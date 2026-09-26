@@ -89,10 +89,21 @@ def _plugins_is_blocked(cmd):
 class Bridge:
     """js_api 实例 —— 所有 public 方法都会暴露成 window.pywebview.api.xxx"""
 
-    def __init__(self, window=None, cfg=None):
+    def __init__(self, window=None, cfg=None, exec_enabled=False):
         self.window = window
         self.cfg = cfg
-        self._exec_enabled = False      # 默认关闭
+        # ★★ exec 开关只能是 Python 侧决定的，绝不能由 JS 打开
+        #
+        #   pywebview 会把 js_api 实例上所有**不带下划线前缀**的方法
+        #   暴露成 window.pywebview.api.xxx。所以曾经的
+        #       def set_exec_enabled(self, on): ...
+        #   等于给了页面里任意一段 JS 一个"一键解锁终端"的开关：
+        #       pywebview.api.set_exec_enabled(true).then(() => gdpy.exec(...))
+        #   黑名单仍在，但门本身是敞开的。
+        #
+        #   现在开关只由 webview_main 依据启动参数 --enable-exec 决定，
+        #   页面无法翻转它。
+        self._exec_enabled = bool(exec_enabled)
         self._n_http = 0
 
     # ---------- 网络 ----------
@@ -230,7 +241,15 @@ class Bridge:
             return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
 
     # ---------- 执行外部命令 ----------
-    def set_exec_enabled(self, on):
+    def exec_enabled(self):
+        """只读查询 —— 页面可以知道能不能用，但改不了
+
+        （无下划线前缀 = 暴露给 JS；只读，所以无风险）
+        """
+        return bool(self._exec_enabled)
+
+    def _set_exec_enabled(self, on):
+        """内部方法：下划线开头，pywebview 不会暴露给 JS"""
         self._exec_enabled = bool(on)
         return self._exec_enabled
 

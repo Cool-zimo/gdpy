@@ -57,11 +57,14 @@ for c in ('cat /logs/shutdown_report.txt', 'rm a.txt', 'chmod 755 x',
     ck('  放行 %r' % c[:30], blocked_reason(c) is None, blocked_reason(c))
 ck('★ 空命令被拦', blocked_reason('') is not None)
 
-print('\n【4】exec 默认关闭')
+print('\n【4】exec 默认关闭（且开关只能由启动参数打开）')
 b2 = Bridge()
 r = b2.exec_command({'cmd': 'echo hi'})
 ck('★ 默认拒绝执行', r.get('ok') is False, r)
-b2.set_exec_enabled(True)
+# ★ 曾经的写法是 b2.set_exec_enabled(True) —— 那是个 public 方法，
+#   pywebview 会暴露成 window.pywebview.api.set_exec_enabled，
+#   页面里任意 JS 都能一键解锁终端。现在开关只在构造时由 Python 决定。
+b2 = Bridge(exec_enabled=True)
 r = b2.exec_command({'cmd': 'rm -rf /'})
 ck('★ 开启后黑名单仍生效', r.get('blocked') is True, r)
 r = b2.exec_command({'cmd': 'echo gdpy_ok'})
@@ -187,7 +190,32 @@ if os.path.isfile(WF):
         n_p = sum(1 for _, _, fn in os.walk(pdir) for f in fn)
         ck('  plugins/ 有 %d 个文件，已整目录打包' % n_p, 'plugins' in wf)
 
+print('\n【9】★★ exec 开关不能被页面（JS）自行打开')
+from gdrive.webview.bridge import Bridge
+
+# pywebview 把 js_api 实例上所有不带下划线前缀的方法暴露给 JS。
+# 曾经有个 public 的 set_exec_enabled —— 页面一行就能解锁终端。
+pub = [m for m in dir(Bridge) if not m.startswith('_') and callable(getattr(Bridge, m))]
+ck('★ Bridge 不暴露 set_exec_enabled', 'set_exec_enabled' not in pub)
+
+b = Bridge()
+ck('★ 默认关闭', b.exec_enabled() is False)
+r = b.exec_command({'cmd': 'echo hi'})
+ck('★ 默认拒绝执行', r.get('ok') is False and '关闭' in (r.get('error') or ''))
+
+b2 = Bridge(exec_enabled=False)
+ck('★ 只有只读查询 exec_enabled', b2.exec_enabled() is False)
+ck('★ _set_exec_enabled 是内部方法（JS 看不到）',
+   hasattr(b2, '_set_exec_enabled') and '_set_exec_enabled' not in pub)
+
+b3 = Bridge(exec_enabled=True)
+ck('★ 显式开启后放行（黑名单仍生效）', b3.exec_enabled() is True)
+r3 = b3.exec_command({'cmd': 'shutdown -h now'})
+ck('★ 开启后黑名单仍拦截', r3.get('blocked') is True)
+
 print('\n' + '='*46)
 print('  %d 通过 / %d 失败' % (passed, failed))
 print('='*46)
+
 sys.exit(1 if failed else 0)
+

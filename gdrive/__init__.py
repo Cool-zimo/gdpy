@@ -11,7 +11,7 @@
 #   ★ 这个兜底值必须与仓库根 VERSION 文件一致 —— 曾经它停在 0.0.7
 #     而实际已发布到 0.0.8，属于"第三处版本号漂移"。
 #     现在由 tests/test_core.py::TestVersionConsistency 盯着。
-_FALLBACK = '0.0.11'
+_FALLBACK = '0.0.12'
 
 try:
     from ._version import __version__ as _v
