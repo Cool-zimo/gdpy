@@ -213,6 +213,67 @@ ck('  中文仍被编码', '%E6%8A%A5' in _ascii_safe('https://a.com/x/报告.pd
 ck('  query 里已编码部分不动',
    '%2Fhome' in _ascii_safe('https://a.com/x?r=%2Fhome&q=中文'))
 
+# ---------------------------------------------------------------------------
+print('\n【8】★ 插件不能给自己提权')
+print('   grants.json 曾放在插件安装目录，插件拿到 fs:write 就能改写它')
+
+import json
+import tempfile
+
+import gdrive.core.config as _cfg
+import gdrive.core.plugins as _P
+_tmp = tempfile.mkdtemp()
+_real_app_dir = _cfg.app_dir
+_cfg.app_dir = lambda: _tmp
+_P.app_dir = lambda: _tmp
+
+try:
+    gs = _P.GrantStore()
+    ck('★★ 授权文件不在 plugins/ 目录内',
+       '/plugins/' not in gs.path.replace('\\', '/'), gs.path)
+
+    gs.grant('evil', ['fs:read', 'fs:list', 'fs:write'])
+    ck('  正常授权可读回', gs.granted('evil') ==
+       ['fs:read', 'fs:list', 'fs:write'])
+
+    # 插件拿到 fs:write 后改写授权文件，给自己加 exec
+    blob = json.load(open(gs.path))
+    blob['data']['evil'] = ['exec', 'fs:write']
+    json.dump(blob, open(gs.path, 'w'))
+    after = _P.GrantStore().granted('evil')
+    ck('★★ 篡改后 exec 不可用（签名不符→未授权）',
+       'exec' not in after, after)
+
+    gs2 = _P.GrantStore()
+    gs2.grant('ok', ['fs:read'])
+    ck('  正常授权往返仍正常', gs2.granted('ok') == ['fs:read'])
+    ck('  授权文件带签名', 'sig' in json.load(open(gs2.path)))
+
+    # 老格式（扁平、无签名）必须迁移，否则升级后用户要重新授权
+    json.dump({'legacy': ['fs:read', 'exec']}, open(gs2.path, 'w'))
+    ck('★★ 老格式自动迁移（升级不丢失授权）',
+       _P.GrantStore().granted('legacy') == ['fs:read', 'exec'])
+    ck('  迁移后补上签名', 'sig' in json.load(open(gs2.path)))
+finally:
+    _cfg.app_dir = _real_app_dir
+    _P.app_dir = _real_app_dir
+
+# ---------------------------------------------------------------------------
+print('\n【9】★ 版本号不能是占位值或凭感觉写的数')
+from gdrive.webview.bridge import Bridge
+_ver = Bridge().app_version()
+ck('★★ app_version 不是 0.0.0', _ver != '0.0.0', _ver)
+ck('★★ 不是未写入的占位值 -dev', not _ver.endswith('-dev'), _ver)
+import gdrive as _g
+ck('★★ gdrive.__version__ 与 app_version 一致',
+   _g.__version__ == _ver, (_g.__version__, _ver))
+ck('  不是曾经乱写的 1.0.0', _ver != '1.0.0', _ver)
+try:
+    import re as _re
+    ck('  形如 x.y.z', bool(_re.match(r'^\d+\.\d+\.\d+$', _ver)), _ver)
+except Exception:
+    pass
+
 print('\n' + '=' * 52)
 print('  %d 通过 / %d 失败' % (PASS, FAIL))
 print('=' * 52)

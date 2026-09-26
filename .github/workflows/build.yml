@@ -119,6 +119,13 @@ jobs:
           Add-MpPreference -ExclusionPath "$PWD\build" -ErrorAction SilentlyContinue
           Write-Host "Defender 排除项已添加"
 
+      - name: 写入版本号
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version }}"
+          printf '%s\n' "__version__ = '$V'" > gdrive/_version.py
+          echo "已写入：$(cat gdrive/_version.py)"
+
       - name: PyInstaller 构建
         shell: bash
         run: |
@@ -177,6 +184,9 @@ jobs:
           mkdir -p out
           cp "dist/${{ matrix.exe }}" "out/${{ matrix.artifact }}-V${{ steps.ver.outputs.version }}${{ matrix.ext }}"
 
+      # ★ 把真实版本号写进 gdrive/_version.py
+      #   少了这一步：app_version() 永远返回 '0.0.0-dev'（回退成兜底值），
+      #   界面显示的版本跟实际发布版本对不上。
       - name: 上传 artifact
         uses: actions/upload-artifact@v4
         with:

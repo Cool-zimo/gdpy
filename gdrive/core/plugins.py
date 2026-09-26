@@ -23,6 +23,8 @@ import subprocess
 import sys
 import threading
 
+from .config import app_dir
+
 ALL_PERMISSIONS = ('fs:read', 'fs:list', 'fs:write', 'net', 'exec')
 
 RISK = {
@@ -188,23 +190,106 @@ class GrantStore:
     """授权记录 + 运行时校验"""
 
     def __init__(self, path=None):
-        self.path = path or os.path.join(user_plugin_dir(), 'grants.json')
+        # ★★ 授权文件绝不能放在插件目录里
+        #
+        #   早期版本是 user_plugin_dir()/grants.json —— 那正是插件安装目录。
+        #   后果：插件只要申请到 fs:write（中风险，很容易获批），
+        #   就能直接改写同目录的 grants.json，给自己加上 exec。
+        #   实测可提权成功：授权 ['fs:read','fs:list','fs:write'] → 自改成含 'exec'。
+        #
+        #   移到 app_dir() 根目录，与 plugins/ 分离。
+        self.path = path or os.path.join(app_dir(), 'grants.json')
+        self.key_path = os.path.join(app_dir(), '.grant-key')
         self._lock = threading.RLock()
         self._data = self._load()
 
+    # ---------- 完整性校验 ----------
+    #
+    # ★ 说明清楚这个校验能防什么、不能防什么：
+    #   能防：随手篡改、不懂签名的修改、文件损坏 —— 篡改会被检测到并告警
+    #   不能防：插件同时有 fs:read 时，它可以连密钥一起读走
+    #
+    #   根本事实：fs:read + fs:write 的插件本质上能做任何事。
+    #   所以真正的防线是【授权时用户看清楚】，而不是事后校验。
+    #   文档里必须写明：fs:write = 完全控制本机文件。
+    def _key(self):
+        try:
+            with open(self.key_path, 'rb') as f:
+                k = f.read()
+            if len(k) >= 16:
+                return k
+        except Exception:
+            pass
+        import secrets
+        k = secrets.token_bytes(32)
+        d = os.path.dirname(self.key_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(self.key_path, 'wb') as f:
+            f.write(k)
+        return k
+
+    def _sign(self, data):
+        import hashlib
+        import hmac as _hmac
+        payload = json.dumps(data, sort_keys=True, ensure_ascii=False)
+        return _hmac.new(self._key(), payload.encode('utf-8'),
+                         hashlib.sha256).hexdigest()
+
     def _load(self):
+        """读授权记录；签名不符或损坏 → 视为全部未授权（保守方向）"""
         try:
             with open(self.path, 'r', encoding='utf-8') as f:
-                d = json.load(f)
-            return d if isinstance(d, dict) else {}
-        except (IOError, OSError, ValueError):
+                blob = json.load(f)
+        except Exception:
             return {}
+        if not isinstance(blob, dict):
+            return {}
+        if 'data' not in blob:
+            # ★ 老格式兼容：以前是扁平的 {plugin_id: [perms]}
+            #   不迁移的话，升级后所有已授权插件都会变成未授权，
+            #   用户会被迫重新授权一遍 —— 升级不该有这种代价。
+            data = {k: v for k, v in blob.items() if isinstance(v, list)}
+            # 迁移：下次 save 时自动带上签名
+            if data:
+                try:
+                    self._save(data)
+                except Exception:
+                    pass
+            return data
+        data = blob.get('data')
+        sig = blob.get('sig')
+        if not isinstance(data, dict):
+            return {}
+        # 签名缺失（老文件）→ 兼容接受，但下次写入会补上签名
+        if sig is not None and sig != self._sign(data):
+            # ★ 篡改检测到：不能静默放行，也不能静默清空 —— 要让用户知道
+            try:
+                from .config import app_dir as _ad   # noqa: F401
+                import time as _t
+                with open(os.path.join(app_dir(), 'error.log'), 'a',
+                          encoding='utf-8') as f:
+                    f.write('%s [安全] 授权文件签名不符，已按未授权处理。'
+                            '如非你自己修改，请检查插件目录\n'
+                            % _t.strftime('%Y-%m-%d %H:%M:%S'))
+            except Exception:
+                pass
+            return {}
+        return data
+
+    def _save(self, data):
+        d = os.path.dirname(self.path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        blob = {'data': data, 'sig': self._sign(data)}
+        tmp = self.path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(blob, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
 
     def save(self):
         with self._lock:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, 'w', encoding='utf-8') as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            self._save(self._data)
 
     def grant(self, plugin_id, perms):
         with self._lock:

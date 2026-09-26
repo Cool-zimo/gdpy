@@ -273,11 +273,30 @@ class Bridge:
             return {'ok': False, 'error': str(e)}
 
     def app_version(self):
+        """版本号 —— 三级回退，且每级都比上一级更可能是真的
+
+        ★ 早期只有 `from .._version import`，而 _version.py 从来没被
+          创建过，于是**永远返回 '0.0.0'**，界面显示的版本跟实际完全不符。
+
+          回退链：_version.py（CI 写入的真实值）
+                  → gdrive.__version__（源码兜底）
+                  → '0.0.0'
+        """
         try:
             from .._version import __version__
-            return __version__
+            v = (__version__ or '').strip()
+            # '0.0.0-dev' 说明 CI 没写入，继续回退
+            if v and not v.endswith('-dev'):
+                return v
         except Exception:
-            return '0.0.0'
+            pass
+        try:
+            from .. import __version__ as _v
+            if _v:
+                return _v
+        except Exception:
+            pass
+        return '0.0.0'
 
     def js_log(self, req):
         """JS 侧 console 落到 Python 日志 —— Windows 下没法开 DevTools"""
