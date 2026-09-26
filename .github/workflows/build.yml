@@ -229,12 +229,19 @@ jobs:
           rm -f smoke.log *.log
           ls -lh .
 
-      - name: 创建 Release（草稿）
+      - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: gdpy v${{ steps.ver.outputs.version }}
-          draft: true
+          # ★ 曾经是 draft: true —— v0.0.8 / 0.0.9 / 0.0.10 / 0.0.11
+          #   连续四个版本停在草稿态：构建全部成功，但用户从主页看不到、
+          #   /releases/latest 返回 404，等于发布了一半。
+          #
+          #   更糟的是我上一轮说"已给 workflow 加了自动发布" ——
+          #   其实根本没改这一行，属于声称做了却没核实。
+          #   这次改的是源头，不是发布时手动补救。
+          draft: false
           prerelease: ${{ startsWith(steps.ver.outputs.version, '0.') }}
           files: dist-all/*
           body: |
