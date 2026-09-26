@@ -30,10 +30,17 @@ class FakeApi:
         if key in self.fail:
             raise RuntimeError('boom ' + key)
         tree = self.trees.get(key, [])
-        return {
-            'tree': [{'path': p, 'type': 'blob', 'size': s} for p, s in tree],
-            'truncated': False,
-        }
+        # 兼容二元组 (path,size) 和三元组 (path,size,sha) —— 老用例写的是二元组
+        norm = []
+        for item in tree:
+            if len(item) == 2:
+                p, sz = item
+                norm.append({'path': p, 'type': 'blob', 'size': sz,
+                             'sha': 'sha-%s' % p})
+            else:
+                p, sz, sh = item
+                norm.append({'path': p, 'type': 'blob', 'size': sz, 'sha': sh})
+        return {'tree': norm, 'truncated': False}
 
 
 def vfs_with(chunks):
@@ -51,6 +58,8 @@ class TestOrphan(unittest.TestCase):
         self.assertEqual(len(rep['orphans']), 1)
         self.assertEqual(rep['orphans'][0]['path'], 'c2')
         self.assertEqual(rep['orphan_bytes'], 200)
+        # ★ 必须带 sha，否则恢复进 VFS 后无法下载/删除
+        self.assertEqual(rep['orphans'][0]['sha'], 'sha-c2')
 
     def test_no_false_orphan(self):
         """全部有记录 → 零孤儿。误报会让用户删掉正在用的文件"""

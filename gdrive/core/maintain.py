@@ -71,7 +71,9 @@ class Maintain:
             base = path.rsplit('/', 1)[-1]
             if base in ignore:
                 continue
-            out.append((path, int(item.get('size', 0) or 0)))
+            # ★ 必须收 sha：恢复孤儿进 VFS 时要用它作为下载/删除的凭据。
+            #   不收的话恢复出的条目缺 sha，后续删除会失败（sha 过期逻辑）。
+            out.append((path, int(item.get('size', 0) or 0), item.get('sha', '')))
         return out, bool(data.get('truncated'))
 
     # ------------------------------------------------------------------
@@ -131,12 +133,13 @@ class Maintain:
             blobs, trunc = got
             if trunc:
                 truncated.append('%s/%s' % (o, rp))
-            m = dict(blobs)
+            m = {p: sz for p, sz, _ in blobs}
             blobmap[(o, rp)] = m
-            for path, size in blobs:
+            for path, size, sha in blobs:
                 if (o, rp, path) not in recorded:
-                    orphans.append({'owner': o, 'repo': rp,
-                                    'path': path, 'size': size})
+                    orphans.append({'owner': o, 'repo': rp, 'path': path,
+                                    'size': size, 'sha': sha,
+                                    'branch': branch})
             usage_actual['%s/%s' % (o, rp)] = sum(m.values())
 
         # 幽灵：VFS 有记录、物理不存在 —— 下载必失败，且不报错
