@@ -24,6 +24,8 @@ EXEMPT = {
         '而是内嵌，从根上不依赖外部文件。'
     ),
     'tools/quark.json': '站点生成用（tools/gen_site.py），运行时不读',
+    'tests/js/test_maintain.js': '前端 js 单元测试（node 跑），不进产物',
+    'tests/js/test_breadcrumb.js': '前端 js 单元测试（node 跑），不进产物',
 }
 
 SKIP_DIRS = {'.git', '__pycache__', 'build', 'dist', '.github',
@@ -85,3 +87,14 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+# ★ js/maintain.js 必须存在于 web/ —— 面包屑常量定义在里面
+#   缺失时 file-manager.js 的 getBreadcrumbs 会 ReferenceError，
+#   表现为整个文件列表打不开（V0.0.4 shim.js 同类问题）
+_mf = os.path.join(ROOT, 'web', 'js', 'maintain.js')
+if not os.path.isfile(_mf):
+    print('✗ web/js/maintain.js 不存在（面包屑依赖它定义的常量）')
+    print('  先跑： GITHUB_TOKEN=xxx python tools/sync_web.py')
+    bad.append('web/js/maintain.js')
+else:
+    print('✓ web/js/maintain.js 已同步')
