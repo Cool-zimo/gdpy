@@ -1,26 +1,42 @@
 """
-与网页版共用 github-drive-config 仓库的配置同步
+config.json 安全写入层 —— 只给维护工具用，不是应用同步层
 
-★ 为什么单独一个模块：
-  网页版的 config.json 是「所有配置的集合」，不止 VFS 一项。
-  早期版本在 ui/app.py 里直接 put_file({'vfs': ...})，
-  整体覆盖了文件 —— 网页版的 repos / fileIndex / starred / recent /
-  shares / repoUsage / storageConfig 全被清掉。
+★ 定位变更（2026-09-26 架构手术）：
 
-  这不是"读不到"，是**破坏性写入**。所以同步逻辑必须独立出来，
-  并且强制走「读-改-写」，不允许整体覆盖。
+    以前：桌面版的 Python 业务层自己读写 config.json，
+          和网页版的 js 各写各的 —— 双实现，必然漂移。
+    现在：应用运行时**完全不碰** config.json。
+          前端 js（web/js/config-sync.js）是唯一写者，桌面版跑的就是那份 js。
 
-★ 字段名对照（两边必须一致，否则跨端读不到）：
+    本模块保留下来，只服务一个场景：
+        maintain.py / recover.py 这类**维护工具**需要写回修改。
+
+    ★ 为什么维护工具也必须走这里，而不是直接 put_file：
+      历史上出过的事故 —— 直接 put_file({'vfs': ...}) 整体覆盖，
+      把网页版的 repos / fileIndex / starred / recent / shares /
+      repoUsage / storageConfig 全清掉了。
+      这不是"读不到"，是**破坏性写入**。
+
+      所以强制「读-改-写」：先读全量 → 只改自己要改的字段 →
+      带 sha 整体写回，未知字段原样保留。
+
+★ storageConfig 只读：
+    那是网页版线上真实生效的值（用户保存设置后写入的）。
+    桌面版改它就是静默改掉用户设置 —— 见 READONLY_CONFIG_KEYS。
+    ★ 曾经想"与 js 保持一致"，照抄了 js/storage.js 的默认值 512KB，
+      但线上实际是 10MB。**要查线上实际值，不是代码默认值。**
+
+★ 字段名对照（与 web 版 exportConfig() 一致，否则跨端读不到）：
 
   web 版 exportConfig()     本模块
   --------------------      ------
-  fileIndex           <-->  fileIndex      ← VFS（早期 vfs 为兼容别名）
+  fileIndex           <-->  fileIndex      ← VFS（vfs 为兼容别名）
   repos               <-->  repos
   starred             <-->  starred
   recent              <-->  recent
   shares              <-->  shares
-  repoUsage           <-->  repoUsage      ★ 值格式不同，见下
-  storageConfig       <-->  storageConfig
+  repoUsage           <-->  repoUsage      ★ 值格式不同，见 _norm_usage
+  storageConfig       <-->  （只读，不写）
   version/updatedAt   <-->  （原样保留）
 """
 from .config import READONLY_CONFIG_KEYS

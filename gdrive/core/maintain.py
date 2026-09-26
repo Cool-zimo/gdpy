@@ -150,6 +150,10 @@ class Maintain:
             if path not in m:
                 ghosts.append({'owner': o, 'repo': rp, 'path': path})
 
+        # ★ 统计字段必须在这里算，不能让调用方各算各的
+        #   （tools/maintain_cli.py 曾用了 file_count / recorded_bytes /
+        #    actual_bytes，而 scan 根本没返回 —— 界面全显示 0。
+        #    又是"写了调用没核对返回结构"，跟 V0.0.4 的 idm[1] 同类。）
         return {
             'orphans': orphans,
             'ghosts': ghosts,
@@ -157,6 +161,11 @@ class Maintain:
             'truncated': truncated,
             'errors': errors,
             'orphan_bytes': sum(o['size'] for o in orphans),
+            # --- 统计 ---
+            'file_count': len(vfs.get('files') or {}),
+            'recorded_bytes': sum(recorded.values()),
+            'actual_bytes': sum(usage_actual.values()),
+            'repo_count': len(repo_keys),
         }
 
     # ------------------------------------------------------------------

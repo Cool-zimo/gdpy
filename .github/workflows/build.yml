@@ -132,6 +132,11 @@ jobs:
           set -o pipefail
           # ★ --add-data 必须带 web/（前端资源），否则 exe 起来是白屏
           #   分隔符 Windows 用 ';'，其它平台用 ':'
+          #
+          # ★ hidden-import 只列实际会被加载的模块。
+          #   v0.0.10 删掉了 vfs/transfer/share（Python 业务层，
+          #   webview 版根本不调用 —— 业务逻辑全在前端 js 里）。
+          #   留着它们只会白增大 exe。
           SEP=":"
           if [ "$RUNNER_OS" = "Windows" ]; then SEP=";"; fi
           pyinstaller --noconfirm --clean --onefile --windowed \
@@ -142,13 +147,13 @@ jobs:
             --hidden-import gdrive.core.api \
             --hidden-import gdrive.core.config \
             --hidden-import gdrive.core.config_sync \
-            --hidden-import gdrive.core.vfs \
-            --hidden-import gdrive.core.transfer \
-            --hidden-import gdrive.core.share \
+            --hidden-import gdrive.core.maintain \
+            --hidden-import gdrive.core.recover \
             --hidden-import gdrive.core.plugins \
             --hidden-import gdrive.webview.bridge \
             --hidden-import gdrive.webview.server \
             --exclude-module tkinter \
+            --exclude-module gdrive.ui \
             webview_main.py 2>&1 | tee build.log
 
       - name: 回传构建日志

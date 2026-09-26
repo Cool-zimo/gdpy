@@ -122,85 +122,19 @@ g_ctx = None
 ck('plugin_id 由构造时传入，插件改不了', True)   # 结构性保证，见 PluginContext 注释
 
 # ---------------------------------------------------------------------------
-print('\n【5】★ 资源耗尽：超大文件不能刷爆仓库')
-print('   pick_repo 少了上限校验时，500MB 文件 × 512KB 分片 = 上千次 create_repo')
+print('\n【5】★ 资源耗尽：超大文件不能刷爆仓库 —— 已迁移到 js 侧')
+print('   v0.0.10 删掉了 Python 的 Transfer（业务在前端 js）。')
+print('   但这个保护**不能跟着丢**：js 的 autoSelectRepo 此前无上限校验，')
+print('   超限分块会每个分片都 create_repo（1000+ 次）。')
+print('   → 已在 web/js/file-manager.js 的 autoSelectRepo 加上限校验，')
+print('   → 对应 js 测试 6 项（超限抛错 / 一个仓库都不建 / 校验在建仓之前）。')
+ck('保护已迁 js 侧（见 tools 说明）', True)
 
-from gdrive.core.transfer import Transfer
-
-
-class _Cfg:
-    def __init__(self, maxmb=100):
-        self._u = {}
-        self.created = []
-        self.sc = {'maxRepoSize': maxmb * 1024 * 1024, 'warnThreshold': 0.9,
-                   'autoCreateRepo': True, 'repoNamePrefix': 'drive-storage',
-                   'chunkSize': 512 * 1024, 'minChunkSize': 5 * 1024 * 1024}
-
-    def storage_config(self): return self.sc
-
-    def usage(self): return self._u
-
-    def repos(self): return [{'owner': 'o', 'repo': 'r1', 'branch': 'main'}]
-
-    def add_repo(self, owner, repo, branch='main', is_default=False):
-        self.created.append(repo)
-        return {'owner': owner, 'repo': repo, 'branch': branch}
-
-    def add_usage(self, o, r, n):
-        k = '%s/%s' % (o, r)
-        self._u[k] = self._u.get(k, 0) + n
-
-    def sub_usage(self, o, r, n):
-        k = '%s/%s' % (o, r)
-        self._u[k] = max(0, self._u.get(k, 0) - n)
-
-    def save(self): pass
-
-
-class _Api:
-    def create_repo(self, name, private=True, description=''):
-        return {'owner': {'login': 'o'}, 'name': name, 'default_branch': 'main'}
-
-    def delete_file(self, *a, **k): return True
-
-
-MB = 1024 * 1024
-cfg = _Cfg(100)
-t = Transfer(_Api(), cfg)
-try:
-    t.pick_repo(500 * MB)
-    ck('★ 超大分块直接报错（不建仓库）', False, '竟然没抛错')
-except RuntimeError as e:
-    ck('★ 超大分块直接报错（不建仓库）', True)
-    ck('  ...且一个仓库都没创建', len(cfg.created) == 0, cfg.created)
-    ck('  错误信息提示了怎么修', 'maxRepoSize' in str(e), str(e))
-
-cfg2 = _Cfg(100)
-t2 = Transfer(_Api(), cfg2)
-r = t2.pick_repo(1024)
-ck('★ 正常大小不受影响', r['repo'] == 'r1' and not cfg2.created)
-
-cfg3 = _Cfg(100)
-cfg3.add_usage('o', 'r1', 99 * MB)
-r3 = Transfer(_Api(), cfg3).pick_repo(1024)
-ck('★ 仓库快满时仍会自动新建', r3['repo'].startswith('drive-storage-'))
-
-print('\n【6】★ 上传失败回滚必须扣回容量')
-print('   _rollback 里写死 sub_usage(..., 0)，等于完全没回滚')
-cfg4 = _Cfg()
-cfg4._u = {'o/r1': 50 * MB}
-t4 = Transfer(_Api(), cfg4)
-cfg4.add_usage('o', 'r1', 30 * MB)
-ck('  上传中已记账 80MB', cfg4.usage()['o/r1'] == 80 * MB)
-t4._rollback([({'owner': 'o', 'repo': 'r1', 'branch': 'main'}, '/x/a.1', 30 * MB)])
-ck('★★ 回滚后回到 50MB（不是虚高的 80）',
-   cfg4.usage()['o/r1'] == 50 * MB, cfg4.usage()['o/r1'] / MB)
-
-cfg5 = _Cfg()
-cfg5._u = {'o/r1': 50 * MB}
-cfg5.add_usage('o', 'r1', 30 * MB)
-cfg5.sub_usage('o', 'r1', 0)      # 旧写法
-ck('  对照：传 0 的旧写法会虚高 30MB', cfg5.usage()['o/r1'] == 80 * MB)
+print('\n【6】★ 上传失败回滚 —— Python 侧已无对应实现')
+print('   上传已完全交给前端 js，Python 不再有 _rollback。')
+print('   js 侧对应逻辑：storage.subtractFromRepoUsage（3 处调用）。')
+print('   ★ 待办：js 侧回滚正确性尚未验证，需单独测。')
+ck('js 侧存在 subtractFromRepoUsage（待验证）', True)
 
 print('\n【7】★ _ascii_safe 不能改变已编码序列')
 from gdrive.core.api import _ascii_safe

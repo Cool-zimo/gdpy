@@ -12,7 +12,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gdrive.core.config_sync import (ConfigSync, normalize_usage,
                                      denormalize_usage, CONFIG_REPO, CONFIG_FILE)
-from gdrive.core.vfs import VFS
 
 passed = failed = 0
 def ck(label, cond, extra=''):
@@ -102,9 +101,15 @@ ck('shares 读到', got['shares'] is not None)
 ck('storageConfig 读到', got['storageConfig'] is not None)
 
 print('\n【3】★ 写入不能破坏网页版的其他字段')
-v = VFS(got['vfs'])
-v.put_file('/drive_home/b.txt', size=20, chunks=[{'path': 'c/1'}])
-ok = cs.push(vfs=v.to_dict(), usage={'me/drive-storage-x': 1019})
+# ★ 不再用 VFS 类（v0.0.10 已删）：直接构造与 web 版同形的 dict
+_vfs = dict(got['vfs'] or {})
+_files = dict(_vfs.get('files') or {})
+_files['/drive_home/b.txt'] = {
+    'name': 'b.txt', 'type': 'file', 'size': 20,
+    'chunks': [{'path': 'c/1'}],
+}
+_vfs['files'] = _files
+ok = cs.push(vfs=_vfs, usage={'me/drive-storage-x': 1019})
 ck('push 成功', ok)
 after = load(api)
 for k in ('repos', 'starred', 'recent', 'shares', 'storageConfig', 'version'):

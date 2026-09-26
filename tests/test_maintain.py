@@ -218,3 +218,33 @@ class TestPlan(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestScanStats(unittest.TestCase):
+    """★ scan 必须返回统计字段 —— CLI 依赖它们
+
+    曾经 scan 只返回 orphans/ghosts/usage_actual 等，
+    而 maintain_cli.py 用了 file_count / recorded_bytes / actual_bytes，
+    结果界面全显示 0（59 个文件显示 0 个）。
+    """
+
+    def _scan(self):
+        from gdrive.core.maintain import Maintain
+        api = FakeApi({'o/r1': [('c1', 100, 's1')]})
+        vfs = {'files': {'/drive_home/a.txt': {
+            'name': 'a.txt', 'type': 'file', 'size': 100,
+            'chunks': [{'owner': 'o', 'repo': 'r1', 'path': 'c1',
+                        'size': 100, 'sha': 's1'}]}}}
+        return Maintain(api, 'o').scan(vfs, [{'owner': 'o', 'repo': 'r1'}])
+
+    def test_has_stat_keys(self):
+        rep = self._scan()
+        for k in ('file_count', 'recorded_bytes', 'actual_bytes',
+                  'orphan_bytes', 'repo_count'):
+            self.assertIn(k, rep, '缺少统计字段 %s' % k)
+
+    def test_stats_not_zero(self):
+        rep = self._scan()
+        self.assertEqual(rep['file_count'], 1)
+        self.assertEqual(rep['recorded_bytes'], 100)
+        self.assertEqual(rep['actual_bytes'], 100)
