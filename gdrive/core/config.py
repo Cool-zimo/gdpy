@@ -21,18 +21,38 @@ import sys
 import threading
 
 DEFAULT_CHUNK = 512 * 1024
+DEFAULT_MIN_CHUNK = 10 * 1024 * 1024
 DEFAULT_MAX_REPO = 900 * 1024 * 1024
 
-# 与 web 版 js/storage.js getStorageConfig() 的默认值保持一致
+# ★ 与 web 版线上 config.json 实测值对齐（不是 storage.js 的代码默认值）
+#
+#   线上真实值（2026-09-26 拉 github-drive-config 实测）:
+#     chunkSize    = 524288      (512 KB)
+#     minChunkSize = 10485760    (10 MB)   ←★
+#
+#   js/storage.js 的 getStorageConfig() 里两个都写 512KB，那是**代码默认**，
+#   用户第一次保存设置后就被真实值覆盖了。**别照抄 js 默认值**。
+#
+#   差 20 倍的后果：minChunkSize 决定"多大的文件才分片"。
+#   线上 10MB 意味着 512KB~10MB 的文件都是单片；桌面版若用 512KB，
+#   这批文件会被切成 2~20 片 —— 与既有文件形态不一致，且多吃 20 倍 API 配额。
 DEFAULT_STORAGE_CONFIG = {
     'maxRepoSize': DEFAULT_MAX_REPO,
     'autoCreateRepo': True,
     'repoNamePrefix': 'drive-storage',
     'warnThreshold': 0.8,
     'chunkSize': DEFAULT_CHUNK,
-    'minChunkSize': DEFAULT_CHUNK,
+    'minChunkSize': DEFAULT_MIN_CHUNK,
     'configVersion': 2,
 }
+
+# ★ 桌面版禁止写入的字段
+#
+#   storageConfig 是**网页版用户的既有设置**（含用户自己调过的分片策略）。
+#   桌面版改它 = 改掉用户的选择，且没有任何提示。
+#   历史教训：config_sync 曾整体覆盖 config.json，把网页版配置清光。
+#   现在虽然改成读-改-写，但仍有"写全量 storageConfig"的路径，必须封死。
+READONLY_CONFIG_KEYS = ('storageConfig',)
 
 # 旧版本遗留的 chunkSize 值 —— 命中就迁移到 512KB
 # （与 web 版 storage.js 的迁移分支一一对应）
@@ -157,8 +177,26 @@ class Config:
         return cfg
 
     def set_storage_config(self, cfg):
-        self.set('storageConfig', cfg)
+        """★ 只允许改本地缓存，禁止同步回远端
+
+        远端 storageConfig 归网页版所有（用户在网页上调过分片策略）。
+        桌面版若写回去，会静默改掉用户设置 —— 见 READONLY_CONFIG_KEYS。
+        """
+        if not isinstance(cfg, dict):
+            raise ValueError('storageConfig 必须是 dict')
+        # 本地只保留已知键，避免把脏数据带进后续计算
+        clean = {k: v for k, v in cfg.items()
+                 if k in DEFAULT_STORAGE_CONFIG}
+        merged = dict(DEFAULT_STORAGE_CONFIG)
+        merged.update(clean)
+        self.set('storageConfig', merged)
         self.save()
+
+    def writable_config_keys(self):
+        """可同步回远端的字段白名单 —— 不含 READONLY_CONFIG_KEYS"""
+        return [k for k in ('repos', 'fileIndex', 'vfs', 'repoUsage',
+                            'shares', 'starred', 'recent')
+                if k not in READONLY_CONFIG_KEYS]
 
     # ---------- 仓库列表 ----------
     def repos(self):

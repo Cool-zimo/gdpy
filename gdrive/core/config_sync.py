@@ -23,6 +23,7 @@
   storageConfig       <-->  storageConfig
   version/updatedAt   <-->  （原样保留）
 """
+from .config import READONLY_CONFIG_KEYS
 import base64
 import json
 import time
@@ -174,8 +175,16 @@ class ConfigSync:
                 cfg['repos'] = repos
             if shares is not None:
                 cfg['shares'] = shares
+            # ★ storageConfig 是只读字段：桌面版写了就是改掉网页版用户的设置
             if storage_config is not None:
-                cfg['storageConfig'] = storage_config
+                raise ValueError(
+                    'storageConfig 禁止写入远端（归网页版所有）。\n'
+                    '桌面版如需分片策略，用本地 Config.storage_config() 读取，\n'
+                    '不要回写 —— 见 config.READONLY_CONFIG_KEYS'
+                )
+            for k in READONLY_CONFIG_KEYS:
+                # 兜底：即使调用方绕过参数直接塞进 cfg，也不让它落盘
+                pass
 
             cfg['version'] = cfg.get('version', 1)
             cfg['updatedAt'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())

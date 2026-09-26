@@ -193,7 +193,34 @@ ck('★ 保留后缀', shorten('averyveryverylongname.txt').endswith('.txt'))
 ck('空值安全', shorten('') == '')
 ck('None 安全', shorten(None) == None)
 
+print('\n【18】★ 版本号三处一致（防漂移）')
+# ★ 历史 bug：VERSION 文件停在 0.0.1 而实际已发布到 0.0.7；
+#   后来又发现 __init__._FALLBACK 停在 0.0.7 而 VERSION 已是 0.0.8。
+#   不传参数触发构建会编出旧版本号 —— 版本号倒退比功能 bug 更难发现。
+import gdrive as _gd
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_vf_path = os.path.join(_root, 'VERSION')
+_vfile = open(_vf_path, encoding='utf-8').read().strip() if os.path.exists(_vf_path) else ''
+
+def _vt(v):
+    try:
+        return tuple(int(x) for x in str(v).lstrip('v').split('.'))
+    except Exception:
+        return (0,)
+
+ck('VERSION 文件是三段版本号',
+   bool(__import__('re').match(r'^\d+\.\d+\.\d+$', _vfile)), _vfile)
+ck('★ _FALLBACK 不落后于 VERSION 文件',
+   _vt(_gd._FALLBACK) >= _vt(_vfile),
+   '_FALLBACK=%s VERSION=%s' % (_gd._FALLBACK, _vfile))
+ck('★ __version__ 不落后于 VERSION 文件',
+   _vt(_gd.__version__) >= _vt(_vfile),
+   '__version__=%s VERSION=%s' % (_gd.__version__, _vfile))
+
 print('\n' + '='*46)
 print('  %d 通过 / %d 失败' % (passed, failed))
 print('='*46)
-sys.exit(1 if failed else 0)
+# ★ 必须保护：不加 if __name__ 的话，import 本模块就会终止进程，
+#   后果是「后面定义的检查永远跑不到」且「合并套件时杀掉整个进程」。
+if __name__ == '__main__':
+    sys.exit(1 if failed else 0)

@@ -7,7 +7,11 @@
 #   互不一致。版本号不能凭感觉写。
 #
 #   占位值 '0.0.0-dev' 表示"CI 没写入"，此时回退到下面这个兜底值。
-_FALLBACK = '0.0.7'
+#
+#   ★ 这个兜底值必须与仓库根 VERSION 文件一致 —— 曾经它停在 0.0.7
+#     而实际已发布到 0.0.8，属于"第三处版本号漂移"。
+#     现在由 tests/test_core.py::TestVersionConsistency 盯着。
+_FALLBACK = '0.0.9'
 
 try:
     from ._version import __version__ as _v
