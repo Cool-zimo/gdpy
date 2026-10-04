@@ -15,16 +15,33 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 
 from ..core.api import _ascii_safe
+from . import netpool
 
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 300
 
+# 网络层失败的重试次数（不含 netpool 内部那次连接重建）
+HTTP_RETRIES = 3
+
+# 全局连接池 —— 跨请求复用 TCP/TLS
+_POOL = netpool._Pool()
+
 # 允许被代理的域名 —— 其余一律拒绝，避免变成任意 HTTP 代理
+#
+# ★ localhost / 127.0.0.1 为什么在这里：
+#   设置里的「后端服务管理」会 fetch http://localhost:8787/api/status。
+#   桌面页 origin 是 http://127.0.0.1:<随机端口>，端口不同即跨源，
+#   会被 shim 转到这里；不放到白名单就是 status 0 —— 面板永远显示"未运行"。
+#   走桥还有个好处：Python 发请求不受 CORS 限制。
+#
+#   风险可控：只能访问用户自己机器上的端口，且页面本身是我们打包进去的。
+#   云元数据地址（169.254.169.254）不在其中，仍然拒绝。
 ALLOWED_HOSTS = (
     'api.github.com',
     'raw.githubusercontent.com',
@@ -36,7 +53,11 @@ ALLOWED_HOSTS = (
     'api.qrserver.com',
     'ghproxy.com',
     'ghproxy.net',
+    'localhost',
 )
+
+# 只认这几个本机地址，避免把整个 127.0.0.0/8 放开
+_LOCAL_HOSTS = ('localhost', '127.0.0.1', '[::1]', '::1')
 
 
 def _host_of(url):
@@ -48,10 +69,16 @@ def _host_of(url):
 
 
 def _host_allowed(url):
-    """后缀匹配，覆盖子域（如 ghproxy.net 的镜像节点）"""
+    """后缀匹配，覆盖子域（如 ghproxy.net 的镜像节点）
+
+    127.0.0.1 单独判：它在 ALLOWED_HOSTS 里写不进去 ——
+    `h.endswith('.127.0.0.1')` 毫无意义，只能精确匹配。
+    """
     h = _host_of(url)
     if not h:
         return False
+    if h in _LOCAL_HOSTS:
+        return True
     for a in ALLOWED_HOSTS:
         if h == a or h.endswith('.' + a):
             return True
@@ -141,37 +168,37 @@ class Bridge:
                 del headers[k]
         headers.pop('Content-Length', None)
 
-        r = urllib.request.Request(url, data=body, method=method)
-        for k, v in headers.items():
-            try:
-                r.add_header(k, v)
-            except Exception:
-                pass
+        # 浏览器语义的头不能透传，交给连接层自己管
+        for k in list(headers.keys()):
+            if k.lower() in ('content-length', 'host', 'connection',
+                             'origin', 'referer', 'accept-encoding',
+                             'transfer-encoding'):
+                del headers[k]
 
-        self._n_http += 1
-        try:
-            with urllib.request.urlopen(r, timeout=DEFAULT_TIMEOUT) as resp:
-                raw = resp.read()
-                return {
-                    'status': resp.status,
-                    'status_text': resp.reason or '',
-                    'headers': {k.lower(): v for k, v in resp.headers.items()},
-                    'body_b64': base64.b64encode(raw).decode('ascii'),
-                }
-        except urllib.error.HTTPError as e:
-            raw = b''
+        # ★ 走带 Keep-Alive 的连接池，不再用 urllib.request.urlopen
+        #
+        #   urlopen 每次都新建 TCP + TLS。实测同一批 8 个 api.github.com 请求：
+        #       新建连接  19.0 ~ 34.3 s
+        #       复用连接   2.8 ~  8.2 s（8 个请求只建了 1 次连接）
+        #   列一次文件列表要发 15 个请求 —— 在国内网络下 TLS 握手的 RTT 更贵，
+        #   这个差距就是"慢到像卡住"和"秒开"的区别。
+        #
+        #   netpool 内部已对"连接被服务端关掉"自动重建重试一次；
+        #   这里再兜一层：整体失败后重试 HTTP_RETRIES 次。
+        msg = ''
+        for i in range(HTTP_RETRIES):
             try:
-                raw = e.read()
-            except Exception:
-                pass
-            return {
-                'status': e.code,
-                'status_text': e.reason or '',
-                'headers': {k.lower(): v for k, v in (e.headers or {}).items()},
-                'body_b64': base64.b64encode(raw).decode('ascii'),
-            }
-        except Exception as e:
-            return {'status': 0, 'status_text': '%s: %s' % (type(e).__name__, e)}
+                resp = netpool.request(method, url, headers=headers,
+                                       body=body, timeout=DEFAULT_TIMEOUT,
+                                       pool=_POOL)
+                self._n_http += 1
+                return resp.as_bridge_dict()
+            except netpool.Error as e:
+                msg = e.msg
+                if i + 1 < HTTP_RETRIES:
+                    time.sleep(0.4 * (i + 1))
+                    continue
+        return {'status': 0, 'status_text': msg, 'headers': {}, 'body_b64': ''}
 
     # ---------- 文件对话框 ----------
     def pick_open_file(self, req=None):
@@ -278,6 +305,30 @@ class Bridge:
             return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
 
     # ---------- 杂项 ----------
+    def open_external(self, req):
+        """用系统默认浏览器打开链接
+
+        ★ 前端有 9 处 window.open()。在 pywebview 里 window.open 会开一个
+          新的 webview 窗口 —— 那个窗口没有 js_api 桥，页面里的分享下载、
+          仓库链接全都是坏的。桌面版必须把这 9 处改道到系统浏览器。
+
+        ★ 只放行 http/https，且必须是白名单域名：
+          javascript: / file: 这类协议交给系统浏览器等于把本机交出去。
+        """
+        url = ((req or {}).get('url') or '').strip()
+        low = url.lower()
+        if not low.startswith(('http://', 'https://')):
+            return {'ok': False, 'error': '只允许 http/https 链接'}
+        if not _host_allowed(url):
+            return {'ok': False,
+                    'error': '域名不在白名单：%s' % _host_of(url)}
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return {'ok': True}
+        except Exception as e:
+            return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+
     def open_in_explorer(self, req):
         path = (req or {}).get('path', '')
         try:

@@ -29,9 +29,22 @@ print('【1】域名白名单（★ 不能变成任意 HTTP 代理）')
 for h in ('api.github.com', 'raw.githubusercontent.com',
           'github.com', 'cool-zimo.github.io'):
     ck('  允许 %s' % h, _host_allowed('https://%s/x' % h))
-for h in ('evil.com', 'api.github.com.evil.com', '127.0.0.1',
-          'localhost', '169.254.169.254'):
+for h in ('evil.com', 'api.github.com.evil.com',
+          '169.254.169.254', '127.0.0.2', '127.1.2.3'):
     ck('  ★ 拒绝 %s' % h, not _host_allowed('https://%s/x' % h))
+
+# ★ 本机地址是**故意放行**的，不是漏出来的。
+#
+#   设置里的「后端服务管理」会 fetch http://localhost:8787/api/status。
+#   桌面页 origin 是 http://127.0.0.1:<随机端口>，端口不同即跨源 →
+#   被 shim 转到 Python 桥 → 不在白名单就是 status 0 →
+#   面板永远显示"未运行"，后端相关功能全灭。
+#
+#   放行范围收紧到这几个确切的本机地址，而不是整个 127.0.0.0/8：
+#   云元数据 169.254.169.254 仍然拒绝（上面已断言）。
+for h in ('localhost', '127.0.0.1'):
+    ck('  允许本机 %s（后端管理面板需要）' % h,
+       _host_allowed('http://%s:8787/api/status' % h))
 ck('  拒绝子域伪装 github.com.attacker.io',
    not _host_allowed('https://github.com.attacker.io/x'))
 ck('  允许 ghproxy 子域', _host_allowed('https://mirror.ghproxy.com/x'))

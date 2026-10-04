@@ -71,9 +71,13 @@ jobs:
         continue-on-error: true
         run: |
           ok=0
-          for t in test_core test_config_sync test_url test_webview; do
+          # ★ 以前这里写死了 4 个文件。后果：test_security（命令黑名单、
+          #   sudo 提权绕过那套）从 v0.0.7 起就存在，却**一次都没在 CI 跑过**。
+          #   现在改成跑 tests/ 下全部 test_*.py —— 新增测试自动被覆盖。
+          for f in tests/test_*.py; do
+            t=$(basename "$f" .py)
             echo "=== $t ==="
-            python tests/$t.py 2>&1 | tee -a smoke.log
+            python "$f" 2>&1 | tee -a smoke.log
             [ "${PIPESTATUS[0]}" -ne 0 ] && ok=1
           done
           echo "exitcode=$ok" >> $GITHUB_OUTPUT

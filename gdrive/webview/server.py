@@ -50,7 +50,16 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def send_head(self):
-        """index.html 注入 shim —— 必须在 </body> 前，那时所有 class 已定义"""
+        """index.html 注入 shim —— 必须是 <head> 里的第一个脚本
+
+        ★ 早期注入在 </body> 前（理由是"那时所有 class 已定义"），
+          但 shim 不引用任何页面 class，而在 </body> 前意味着它跑在
+          index.html 头部那段「分支预览 → 从 jsdelivr CDN 拉代码」
+          的 document.write **之后**，拦不住。
+
+          放到 <head> 首位才能：清掉 localStorage 里的分支选择、
+          包住 document.write、并把 window.open 改道到系统浏览器。
+        """
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             path = os.path.join(path, 'index.html')
@@ -59,11 +68,7 @@ class Handler(SimpleHTTPRequestHandler):
                 with open(path, 'rb') as f:
                     raw = f.read()
                 tag = SHIM_TAG.encode('utf-8')
-                if b'</body>' in raw:
-                    body = raw.replace(b'</body>', tag + b'\n</body>')
-                else:
-                    # 页面里没有 </body>（不该发生），退化成追加到末尾
-                    body = raw + b'\n' + tag
+                body = _inject_head(raw, tag)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(body)))
@@ -77,6 +82,28 @@ class Handler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass        # 不刷控制台，Windows 下没有控制台可刷
+
+
+_HEAD_RE = None
+
+
+def _inject_head(raw, tag):
+    """把 tag 插到 <head> 开头
+
+    找不到 <head>（页面不规范）时退化成插到 <html> 后；
+    再找不到就追加到末尾 —— 至少不丢功能。
+    """
+    import re as _re
+    global _HEAD_RE
+    if _HEAD_RE is None:
+        _HEAD_RE = _re.compile(br'<head\b[^>]*>', _re.I)
+    m = _HEAD_RE.search(raw)
+    if m:
+        return raw[:m.end()] + b'\n' + tag + raw[m.end():]
+    m = _re.search(br'<html\b[^>]*>', raw, _re.I)
+    if m:
+        return raw[:m.end()] + b'\n' + tag + raw[m.end():]
+    return raw + b'\n' + tag
 
 
 def shim_source():
