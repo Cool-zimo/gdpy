@@ -262,7 +262,14 @@ jobs:
           #   其实根本没改这一行，属于声称做了却没核实。
           #   这次改的是源头，不是发布时手动补救。
           draft: false
-          prerelease: ${{ startsWith(steps.ver.outputs.version, '0.') }}
+          # ★ prerelease 曾经是 startsWith(version, '0.') ——
+          #   我们所有版本都是 0.x.x，于是每个 release 都被标成预发布。
+          #   后果：/releases/latest 返回 404（GitHub 的 latest 不含预发布），
+          #   任何用 latest 直达下载的链接全部失效。
+          #
+          #   0.x.x 是我们的正常版本号，不是"预发布"的意思。
+          #   真正的预发布用带后缀的号（0.0.15-rc1 / -beta1），只认 '-'。
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
           files: dist-all/*
           body: |
             ## Desktop_Github-Drive v${{ steps.ver.outputs.version }}
