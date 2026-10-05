@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gdpy</title>
+<style>
+:root{
+  --v:#7c5cff; --v2:#a78bfa; --c:#22d3ee;
+  --bg:#0a0b12; --panel:#14161f; --panel2:#1a1d29;
+  --line:#262a38; --ink:#eaecf4; --dim:#9aa3b8; --dim2:#7b8499;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--ink);
+  font:15px/1.78 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;padding:0 0 60px;
+  /* 代码块、表格各自横滚，页面本身不该能横滚 */
+  overflow-x:hidden;
+}
+a{color:var(--v2);text-decoration:none}
+a:hover{text-decoration:underline}
+body::before{
+  content:"";position:fixed;top:-200px;left:50%;transform:translateX(-50%);
+  width:900px;height:520px;border-radius:50%;filter:blur(120px);
+  background:radial-gradient(circle,rgba(124,92,255,.22),transparent 68%);
+  z-index:0;pointer-events:none;
+}
+.top{
+  position:relative;z-index:1;text-align:center;padding:52px 22px 30px;
+  border-bottom:1px solid var(--line);
+}
+.top h1{font-size:31px;font-weight:750;letter-spacing:-.02em;margin-bottom:8px}
+.top .sub{color:var(--dim);font-size:14px}
+.top .repo{
+  display:inline-block;margin-top:14px;font-size:12px;padding:4px 13px;border-radius:999px;
+  background:var(--panel2);border:1px solid var(--line);color:var(--dim2);
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.body{position:relative;z-index:1;max-width:820px;margin:0 auto;padding:34px 22px 0}
+.body h1,.body h2,.body h3{margin:30px 0 12px;line-height:1.4}
+.body h1{font-size:25px}
+.body h2{
+  font-size:19px;padding-bottom:8px;border-bottom:1px solid var(--line);
+}
+.body h3{font-size:16px}
+.body p{margin:12px 0;color:#cfd5e4;overflow-wrap:break-word}
+.body ul,.body ol{margin:12px 0 12px 24px;color:#cfd5e4}
+.body li{margin:5px 0}
+.body code{
+  background:var(--panel2);border:1px solid var(--line);border-radius:5px;
+  padding:1.5px 6px;font-size:13px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#e5c9ff;
+}
+.body pre{
+  background:var(--panel);border:1px solid var(--line);border-radius:11px;
+  padding:15px 17px;margin:15px 0;line-height:1.6;
+  /* 必须限宽再滚：只写 overflow-x:auto 的话，长代码行会把容器撑开，
+     整页跟着能横向滚 —— 实测 390px 视口下页面宽到了 476px。 */
+  max-width:100%;overflow-x:auto;
+}
+.body pre code{
+  background:none;border:none;padding:0;color:#d7dceb;font-size:13px;
+  white-space:pre;
+}
+.body table{border-collapse:collapse;width:100%;margin:16px 0;font-size:13.5px;
+  display:block;max-width:100%;overflow-x:auto}
+.body th,.body td{border:1px solid var(--line);padding:9px 12px;text-align:left}
+.body th{background:var(--panel2);font-weight:650}
+.body blockquote{
+  border-left:3px solid var(--v);background:rgba(124,92,255,.07);
+  margin:15px 0;padding:11px 16px;border-radius:0 9px 9px 0;color:#c3cadb;
+}
+.body img{max-width:100%;border-radius:9px}
+.body hr{border:none;border-top:1px solid var(--line);margin:28px 0}
+.acts{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:34px}
+.act{
+  display:inline-block;padding:11px 22px;border-radius:11px;font-size:14px;font-weight:600;
+  transition:.2s cubic-bezier(.22,.9,.3,1);
+}
+.act.go{
+  background:linear-gradient(135deg,var(--v),#b06cf0);color:#fff;
+  box-shadow:0 10px 24px -10px var(--v);
+}
+.act.go:hover{transform:translateY(-2px);text-decoration:none;
+  box-shadow:0 14px 30px -10px var(--v)}
+.act.src{background:var(--panel);border:1px solid var(--line);color:var(--dim)}
+.act.src:hover{border-color:var(--v);color:var(--ink);text-decoration:none;
+  transform:translateY(-2px)}
+footer{
+  text-align:center;margin-top:44px;padding-top:22px;border-top:1px solid var(--line);
+  font-size:12px;color:var(--dim2);
+}
+footer a{color:var(--dim)}
+@media(max-width:600px){
+  .top{padding:38px 18px 24px}
+  .top h1{font-size:25px}
+  .body{padding:26px 16px 0}
+}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>gdpy</h1>
+  <div class="sub">GitHub Drive 桌面版 · Python + Tkinter · 与 web 版数据格式兼容</div>
+  <div class="repo">gdpy</div>
+</div>
+<div class="body">
+<p>Python + Tkinter 写的 GitHub Drive 桌面客户端。<strong>源码公开，可执行文件不入库</strong>（体积太大），
+由 GitHub Actions 编译，产物放在 Release 里。</p>
+<h2>为什么做桌面版</h2>
+<p>网页版跑在浏览器沙箱里，<strong>碰不到文件系统、起不了进程</strong>。所以下面这些事网页版永远做不了：</p>
+<ul>
+<li>把网盘里的文件同步到本地某个目录</li>
+<li>下载完自动调用本地工具处理（转码、解压、预览）</li>
+<li>开机自启、托盘常驻</li>
+</ul>
+<p>桌面版补的就是这块。所以这是<strong>新生态，不是移植</strong>。</p>
+<h2>安装</h2>
+<p>从 Release 下载对应平台的文件，直接运行，<strong>无需安装 Python</strong>。</p>
+<table>
+<thead>
+<tr>
+  <th>平台</th>
+  <th>文件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Windows</td>
+  <td><code>Desktop_Github-Drive-Windows-Vx.x.x.exe</code></td>
+</tr>
+<tr>
+  <td>macOS</td>
+  <td><code>Desktop_Github-Drive-macOS-Vx.x.x</code></td>
+</tr>
+<tr>
+  <td>Linux</td>
+  <td><code>Desktop_Github-Drive-Linux-Vx.x.x</code></td>
+</tr>
+</tbody>
+</table>
+<p>首次运行填入 GitHub Personal Access Token（需 <code>repo</code> 权限）。
+令牌只存在本机配置文件里，不上传任何服务器。</p>
+<h2>与网页版的数据兼容性</h2>
+<p><strong>完全兼容，双向。</strong> 网页版上传的文件，桌面版打开就能看见、能下载；反之亦然。</p>
+<p>保持一致的关键契约：</p>
+<table>
+<thead>
+<tr>
+  <th>项目</th>
+  <th>约定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>VFS 结构</td>
+  <td><code>files</code> / <code>folders</code> 两个 dict，字段名与 <code>js/storage.js</code> 一致</td>
+</tr>
+<tr>
+  <td>分片路径</td>
+  <td><code>{base36(毫秒时间戳)}/{文件名}</code>，多分片为 <code>{原名}.{序号}</code>（从 1 开始）</td>
+</tr>
+<tr>
+  <td>分片大小</td>
+  <td>512KB（&gt;1MB 走 Git blob API，≤1MB 走 Contents API）</td>
+</tr>
+<tr>
+  <td>存储仓</td>
+  <td><code>drive-storage-{YYYY-MM-DD}-{4位hex}</code>，私有</td>
+</tr>
+<tr>
+  <td>配置仓</td>
+  <td><code>github-drive-config</code>（与网页版共用）</td>
+</tr>
+<tr>
+  <td>分享仓</td>
+  <td><code>gd-share-{6位hex}</code>，公开 + Pages</td>
+</tr>
+<tr>
+  <td>忽略文件</td>
+  <td><code>index.html</code> / <code>README.md</code> / <code>status.js</code> / <code>share.json</code></td>
+</tr>
+</tbody>
+</table>
+<p>⚠️ 改这些常量之前先看 <code>docs</code> 仓库的 <code>github-drive.md</code>，改错一个就会导致跨端读不到文件。</p>
+<h2>插件系统</h2>
+<p><strong>与网页版插件不兼容，也不打算兼容。</strong> 网页插件是 HTML+JS，跑在沙箱里；
+桌面插件是 Python，能读写本地文件、调用外部程序。</p>
+<p>三层安全模型：</p>
+<ol>
+<li><strong>声明</strong> —— <code>plugin.json</code> 里写 <code>permissions</code></li>
+<li><strong>授权</strong> —— 安装时弹窗确认；官方仓库自动授信</li>
+<li><strong>校验</strong> —— ★ 运行时<strong>每次调用</strong>都查</li>
+</ol>
+<pre><code>fs:read / fs:list   低风险
+net                 中风险
+fs:write            高风险
+exec                ⛔ 极高风险（等于把终端交出去）
+</code></pre>
+<p>未知权限一律按最高风险处理。授权了 <code>exec</code> 也还有命令黑名单兜底。</p>
+<p>⚠️ <strong>自动授信 ≠ 取消运行时校验。</strong> 取消校验的话，插件 A 能冒充插件 B 调用
+已授权的能力，整个权限模型形同虚设。</p>
+<p>插件目录：</p>
+<pre><code>Windows  %APPDATA%\gdpy\plugins
+macOS    ~/Library/Application Support/gdpy/plugins
+Linux    ~/.config/gdpy/plugins
+</code></pre>
+<p>插件结构：</p>
+<pre><code>myplugin/
+  plugin.json   { &quot;id&quot;, &quot;name&quot;, &quot;version&quot;, &quot;entry&quot;: &quot;main.py&quot;, &quot;permissions&quot;: [...] }
+  main.py       def run(ctx): ...
+</code></pre>
+<h2>从源码运行</h2>
+<pre><code class="language-bash">pip install -r requirements.txt
+python main.py
+</code></pre>
+<p>需要系统 Tkinter：</p>
+<pre><code class="language-bash"># Ubuntu/Debian
+sudo apt-get install python3-tk
+</code></pre>
+<h2>构建</h2>
+<p>可执行文件由 GitHub Actions 构建，不入库：</p>
+<pre><code>Actions → Build Desktop → Run workflow → 填版本号（留空读 VERSION 文件）
+</code></pre>
+<p>版本号规范：<strong>测试版 <code>0.x.x</code>，正式版从 <code>1.0.0</code> 起</strong>。产物名带版本号，
+如 <code>Desktop_Github-Drive-Windows-V0.0.1.exe</code>。</p>
+<h2>测试</h2>
+<pre><code class="language-bash">python tests/test_core.py
+</code></pre>
+<p>59 项，纯逻辑不需要 GUI。</p>
+
+  <div class="acts">
+    
+    <a class="act src" href="https://github.com/Cool-zimo/gdpy">看源码 →</a>
+  </div>
+</div>
+<footer>托管在 GitHub Pages · <a href="https://github.com/Cool-zimo/gdpy">Cool-zimo/gdpy</a></footer>
+</body>
+</html>
