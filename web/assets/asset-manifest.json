@@ -1,0 +1,26 @@
+{
+  "hashes": {
+    "anim": "d823f0bce1",
+    "app": "f59570579f",
+    "branch-guard": "2a17031683",
+    "bridge": "5cd1cbc1ce",
+    "cangshu-link": "d87df4f3cb",
+    "config-sync": "7cbbcc1ecd",
+    "custom": "7f8b7f7807",
+    "extension": "ac2832ce10",
+    "file-manager": "6d3d9fdb9e",
+    "gesture": "4896dd831d",
+    "github-api": "389e7c20c9",
+    "i18n-scan": "04ab5f83ac",
+    "i18n": "7ea34c4dda",
+    "icons": "ec755c29b9",
+    "maintain": "b10def0baf",
+    "plugin-api": "ad584338e1",
+    "share": "27afaa1375",
+    "storage": "e360e26265",
+    "task-dock": "b85747e5e4",
+    "theme": "89aafc792a",
+    "ui": "2a852b92c2",
+    "version": "8de8975ee1"
+  }
+}

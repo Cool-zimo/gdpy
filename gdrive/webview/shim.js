@@ -46,6 +46,16 @@
         if (typeof s === 'string' && s.indexOf('cdn.jsdelivr.net') !== -1) {
             s = s.replace(/https?:\/\/cdn\.jsdelivr\.net\/gh\/[^/'"\s]+\//g, '');
         }
+        // ★★ v0.0.79 起 index.html 默认加载 js/xxx.min.js（网页版要省流量）。
+        //   桌面版是本地文件，没有省流量的必要，但**有一个致命副作用**：
+        //   min.js 由网页版的构建流程生成，同步脚本只负责搬运，
+        //   所以源码改了而 min.js 没重新压缩时，桌面版跑的仍是旧代码 ——
+        //   表现为"明明改了却不生效"，而且没有任何报错。
+        //
+        //   强制走未压缩的 .js，源码即运行代码，改什么就是什么。
+        if (typeof s === 'string' && s.indexOf('.min.js') !== -1) {
+            s = s.replace(/(js\/[A-Za-z0-9_-]+)\.min\.js/g, '$1.js');
+        }
         return _write(s);
     };
 

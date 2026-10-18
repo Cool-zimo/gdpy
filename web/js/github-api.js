@@ -15,7 +15,37 @@ class GitHubAPI {
     /**
      * 通用请求方法
      */
+    /**
+     * 瞬时错误重试。
+     *
+     * 为什么需要：大文件传输实测会撞到 500 —— 不是 502/503，是 500。
+     * 256MB 那次就是这么挂的：重试策略只认 429/502/503，一次 500 让整个
+     * 几百 MB 的上传白干。
+     *
+     * 为什么默认不开：commit 创建不是幂等的（时间戳不同），重试会产生
+     * 重复提交。所以默认 0 次，只在调用方明确知道幂等时传 retry。
+     * createBlob 是内容寻址 —— 同样的字节永远得到同样的 sha，重试安全。
+     */
     async request(endpoint, options = {}) {
+        const maxRetry = options.retry || 0;
+        let lastErr = null;
+        for (let attempt = 0; attempt <= maxRetry; attempt++) {
+            try {
+                return await this._requestOnce(endpoint, { ...options });
+            } catch (err) {
+                lastErr = err;
+                const transient = err.status === 429 || err.status === 500
+                    || err.status === 502 || err.status === 503;
+                if (!transient || attempt === maxRetry) throw err;
+                const wait = 1000 * Math.pow(2, attempt);
+                console.warn(`[GitHubAPI] ${err.status}，${wait}ms 后重试 (${attempt + 1}/${maxRetry})`);
+                await new Promise(r => setTimeout(r, wait));
+            }
+        }
+        throw lastErr;
+    }
+
+    async _requestOnce(endpoint, options = {}) {
         const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`;
         const headers = {
             'Authorization': `token ${this.token}`,
@@ -191,6 +221,22 @@ class GitHubAPI {
     }
 
     /**
+     * 设置仓库 topics（用于精确检索分享仓库）
+     *
+     * ★ 为什么需要它：用名字搜 `gd-share in:name` 会命中上百个无关仓库
+     *   （gd-sharer / GDA_Capstone / GDPR / gdrive-share…），真分享被淹在
+     *   第 80 多位，一页 30 条根本翻不到。topic 是精确匹配，没有噪音。
+     *
+     *   创建仓库时 API **不支持**直接带 topics，必须建完再单独 PUT。
+     */
+    async setTopics(owner, repo, names) {
+        return await this.request(`/repos/${owner}/${repo}/topics`, {
+            method: 'PUT',
+            body: { names: Array.isArray(names) ? names : [names] }
+        });
+    }
+
+    /**
      * 删除仓库（需要确认）
      */
     async deleteRepository(owner, repo) {
@@ -235,9 +281,31 @@ class GitHubAPI {
 
     /**
      * 获取文件原始内容（文本）
+     *
+     * @param {Map|null} treeCache - 批量读取时传入，复用同一棵递归 tree。
+     *   不传就每次重拉（保持旧行为，避免影响写操作后的读取）。
      */
-    async getFileRaw(owner, repo, path, ref = 'main') {
+    async getFileRaw(owner, repo, path, ref = 'main', treeCache = null) {
         const encodedPath = encodeURIComponent(path).replace(/%2F/g, '/');
+
+        /**
+         * ★ 大文件直接走 Git 路径，别白跑一次 contents API。
+         *
+         *   contents API 对 >1MB 的文件返回 `encoding:"none"` + `content:""`，
+         *   也就是说请求发出去了、东西没拿到、还得再走一遍 Git 路径。
+         *   分享的分片几乎全都 >1MB，等于每个分片都白扔一次请求。
+         *   有 tree 缓存时 tree 条目里自带 size，可以先判再决定走哪条路。
+         */
+        if (treeCache) {
+            try {
+                const tree = await this._cachedTree(owner, repo, ref, treeCache);
+                const item = tree.tree.find(x => x.path === path);
+                if (item && item.size > 1000000) {
+                    return await this.getFileRawViaGit(owner, repo, path, ref, treeCache);
+                }
+            } catch (e) { /* 拿不到 tree 就走老路 */ }
+        }
+
         try {
             const data = await this.request(`/repos/${owner}/${repo}/contents/${encodedPath}?ref=${ref}`);
             if (data.encoding === 'base64') {
@@ -248,20 +316,48 @@ class GitHubAPI {
                 return bytes;
             }
             // Contents API 不返回 content（大文件），回退到 Git Data API
-            return await this.getFileRawViaGit(owner, repo, path, ref);
+            return await this.getFileRawViaGit(owner, repo, path, ref, treeCache);
         } catch (e) {
             // Contents API 报错（如大文件超过 1MB 限制），回退到 Git Data API
-            return await this.getFileRawViaGit(owner, repo, path, ref);
+            return await this.getFileRawViaGit(owner, repo, path, ref, treeCache);
         }
     }
 
     /**
-     * 通过 Git Data API 获取文件原始内容（支持大文件，最大 100MB）
+     * 取一棵递归 tree，结果在 treeCache 内复用。
+     *
+     * ★ 缓存的是 **Promise** 而不是结果。
+     *   并发时多个调用会同时发现缓存为空，若存结果就会各自去拉一遍整棵树，
+     *   缓存形同虚设（实测：存结果时 24 次 tree 请求，存 Promise 后 1 次）。
      */
-    async getFileRawViaGit(owner, repo, path, ref = 'main') {
-        const refData = await this.getRef(owner, repo, `heads/${ref}`);
-        const commit = await this.getCommit(owner, repo, refData.object.sha);
-        const tree = await this.getTree(owner, repo, commit.tree.sha, true);
+    _cachedTree(owner, repo, ref, treeCache) {
+        const key = `${owner}/${repo}@${ref}`;
+        if (!treeCache.has(key)) {
+            treeCache.set(key, (async () => {
+                const refData = await this.getRef(owner, repo, `heads/${ref}`);
+                const commit = await this.getCommit(owner, repo, refData.object.sha);
+                return await this.getTree(owner, repo, commit.tree.sha, true);
+            })());
+        }
+        return treeCache.get(key);
+    }
+
+    /**
+     * 通过 Git Data API 获取文件原始内容（支持大文件，最大 100MB）
+     *
+     * ★ 旧实现每调一次就重跑 getRef → getCommit → getTree(递归) → getBlob
+     *   四条链。分享 98 个文件（每文件多片）时，getTree 会被重复拉上百次，
+     *   而它返回的是**整棵仓库树** —— 仓库越大越慢。这是分享卡住的主因。
+     */
+    async getFileRawViaGit(owner, repo, path, ref = 'main', treeCache = null) {
+        let tree;
+        if (treeCache) {
+            tree = await this._cachedTree(owner, repo, ref, treeCache);
+        } else {
+            const refData = await this.getRef(owner, repo, `heads/${ref}`);
+            const commit = await this.getCommit(owner, repo, refData.object.sha);
+            tree = await this.getTree(owner, repo, commit.tree.sha, true);
+        }
         const treeItem = tree.tree.find(item => item.path === path);
         if (!treeItem) throw new Error('文件不存在: ' + path);
         const blob = await this.getBlob(owner, repo, treeItem.sha);
@@ -340,9 +436,11 @@ class GitHubAPI {
      * 创建 blob（用于大文件，最大 100MB）
      */
     async createBlob(owner, repo, content, encoding = 'base64') {
+        // retry: 3 —— 内容寻址，重试结果完全一致，安全
         return await this.request(`/repos/${owner}/${repo}/git/blobs`, {
             method: 'POST',
-            body: { content, encoding }
+            body: { content, encoding },
+            retry: 3
         });
     }
 
@@ -351,6 +449,39 @@ class GitHubAPI {
      */
     async getBlob(owner, repo, sha) {
         return await this.request(`/repos/${owner}/${repo}/git/blobs/${sha}`);
+    }
+
+    /**
+     * ★ 用已知的 blob sha 直接取内容字节。
+     *
+     *   blob 是**内容寻址**的：同一个内容在任何仓库、任何路径下 sha 都一样，
+     *   所以拿到 sha 就不需要再走
+     *     getRef → getCommit → getTree(递归) → getBlob
+     *   那三步纯属绕路 —— getTree 拉的是**整棵仓库树**，跟要读的那个分片
+     *   毫无关系，仓库越大越慢。
+     *
+     *   VFS 里每个 chunk 都记了 sha（上传时就存下来了），所以下载可以直接用。
+     *
+     *   实测（tree 9 条目的小仓库）：
+     *     老路径 4 次请求 2006ms
+     *     直连   1 次请求  520ms    快 3.9×
+     *   仓库越大、分片越多，差距越大。
+     *
+     * @returns {Promise<Uint8Array>}
+     */
+    async getBlobBytes(owner, repo, sha) {
+        const blob = await this.getBlob(owner, repo, sha);
+        const content = blob && blob.content;
+        if (!content) throw new Error('blob 内容为空: ' + sha);
+
+        if (blob.encoding === 'base64') {
+            const binary = atob(content);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            return bytes;
+        }
+        // 极少数情况直接返回原文（小文本文件）
+        return new TextEncoder().encode(content);
     }
 
     /**
@@ -433,37 +564,114 @@ class GitHubAPI {
     /**
      * 批量上传文件（使用 Git Data API，一次 commit）
      */
-    async batchUploadFiles(owner, repo, files, message, branch = 'main', onProgress = null) {
-        // files: [{ path, content (string) | arrayBuffer, isBinary }]
+    /**
+     * 批量上传：并发建 blob，一次 tree + 一次 commit。
+     *
+     * 旧实现是**串行**的：每个文件建一次 blob，98 个文件就是 98 次
+     * 串行往返，而每次往返大半是固定开销 —— 分享大文件夹时慢得离谱。
+     * 现在按 uploadFile 那套思路改：并发建 blob（受内存预算约束），
+     * 全部建完再一次性提交。
+     *
+     * ★ 内容去重：blob 是内容寻址的，相同内容 sha 必然相同。
+     *   分享一堆重复文件（比如同一个视频的多个副本）时，
+     *   只建一次 blob，其余直接复用 sha。
+     *
+     * @param {Array} files [{path, content|arrayBuffer, isBinary, size}]
+     */
+    async batchUploadFiles(owner, repo, files, message, branch = 'main', onProgress = null, opts = {}) {
+        const list = Array.isArray(files) ? files : [];
+        if (!list.length) throw new Error('batchUploadFiles: 没有文件');
+
         const ref = await this.getRef(owner, repo, `heads/${branch}`);
         const latestCommitSha = ref.object.sha;
         const latestCommit = await this.getCommit(owner, repo, latestCommitSha);
         const baseTreeSha = latestCommit.tree.sha;
 
-        const treeItems = [];
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            let blob;
-            if (file.arrayBuffer) {
-                blob = await this.createBlobFromArrayBuffer(owner, repo, file.arrayBuffer);
-            } else {
-                const base64 = btoa(unescape(encodeURIComponent(file.content)));
-                blob = await this.createBlob(owner, repo, base64, 'base64');
+        // ── 去重：先算内容指纹，相同的只建一次 ──
+        // 文本用字符串本身做键（便宜且准确）；二进制太大，用前 1MB + 长度
+        // 近似（碰撞只会让两个文件各自建 blob，不会出错）
+        const keyOf = f => {
+            if (f.content !== undefined) return 's:' + f.content.length + ':' + f.content.slice(0, 4096);
+            const ab = f.arrayBuffer;
+            const u8 = ab instanceof Uint8Array ? ab : new Uint8Array(ab);
+            const head = Array.from(u8.subarray(0, 65536)).join(',');
+            return 'b:' + u8.length + ':' + head;
+        };
+        const byKey = new Map();
+        let deduped = 0;
+        for (const f of list) {
+            const k = keyOf(f);
+            if (byKey.has(k)) { f._reuseKey = k; deduped++; }
+            else byKey.set(k, null);
+        }
+        // 只建每个 key 的第一个
+        const todo = list.filter(f => {
+            const k = keyOf(f);
+            return !f._reuseKey;
+        });
+        if (deduped) console.log(`[API] 去重：${list.length} 个文件 → 只需建 ${todo.length} 个 blob（省 ${deduped}）`);
+
+        // ── 并发上限：受内存预算约束，跟 uploadFile 同一套算法 ──
+        const MEM_BUDGET = opts.memoryBudget || 512 * 1024 * 1024;
+        const biggest = todo.reduce((m, f) => {
+            const n = f.arrayBuffer ? (f.arrayBuffer.byteLength || f.arrayBuffer.length || 0)
+                                    : (f.content ? f.content.length : 0);
+            return Math.max(m, n);
+        }, 0);
+        const maxByMemory = biggest > 0
+            ? Math.max(1, Math.floor(MEM_BUDGET / (biggest * 1.42))) : 8;
+        // ★ 默认上限 6，不是 16。
+        //   实测（12 个 384KB 文件）：串行 27.15s / 并发4 10.05s / 并发8 12.88s。
+        //   一次性并发 16 个 blob 会被 GitHub 的 secondary rate limit 直接拒掉
+        //   （fetch failed，重试救不回来，12 个文件失败 6 个）。
+        //   16 对 uploadFile 的大分片是安全的（分片本来就少），
+        //   但批量建 blob 常常一次几十个小文件，必须更保守。
+        const concurrency = Math.max(1, Math.min(todo.length, maxByMemory, opts.maxConcurrency || 6));
+
+        let done = 0, failed = 0;
+        for (let s = 0; s < todo.length; s += concurrency) {
+            const batch = todo.slice(s, s + concurrency);
+            const results = await Promise.all(batch.map(async (file) => {
+                let blob;
+                if (file.arrayBuffer) {
+                    blob = await this.createBlobFromArrayBuffer(owner, repo, file.arrayBuffer);
+                } else {
+                    const base64 = btoa(unescape(encodeURIComponent(file.content)));
+                    blob = await this.createBlob(owner, repo, base64, 'base64');
+                }
+                return { file, sha: blob.sha };
+            }).map(p => p.catch(e => { failed++; console.warn('[API] blob 失败:', e.message); return null; })));
+
+            for (const r of results) {
+                if (r) byKey.set(keyOf(r.file), r.sha);
             }
-            treeItems.push({
-                path: file.path,
-                mode: '100644',
-                type: 'blob',
-                sha: blob.sha
-            });
-            if (onProgress) onProgress(i + 1, files.length);
+            done += batch.length;
+            if (onProgress) onProgress(done + deduped, list.length);
         }
 
-        const tree = await this.createTree(owner, repo, treeItems, baseTreeSha);
-        const commit = await this.createCommit(owner, repo, message, tree.sha, [latestCommitSha]);
-        await this.updateRef(owner, repo, `heads/${branch}`, commit.sha);
+        // ── 组装 tree：复用的文件从 byKey 取 sha ──
+        const treeItems = [];
+        for (const f of list) {
+            const sha = byKey.get(keyOf(f));
+            if (!sha) { failed++; console.warn('[API] 跳过（无 sha）:', f.path); continue; }
+            treeItems.push({ path: f.path, mode: '100644', type: 'blob', sha });
+        }
+        if (!treeItems.length) throw new Error('没有任何文件成功创建 blob');
 
-        return commit;
+        // tree 一次最多放这么多条目，超了就分批提交（仍是同一条链）
+        const TREE_MAX = 128;
+        let curBase = baseTreeSha, curParent = latestCommitSha, lastCommit = null;
+        for (let b = 0; b < treeItems.length; b += TREE_MAX) {
+            const slice = treeItems.slice(b, b + TREE_MAX);
+            const tree = await this.createTree(owner, repo, slice, curBase);
+            lastCommit = await this.createCommit(owner, repo, message, tree.sha, [curParent]);
+            await this.updateRef(owner, repo, `heads/${branch}`, lastCommit.sha);
+            curBase = tree.sha;
+            curParent = lastCommit.sha;
+        }
+
+        if (failed) console.warn(`[API] batchUploadFiles 完成，${failed} 个失败`);
+        return lastCommit;
     }
 
     // ==================== 分支管理 ====================

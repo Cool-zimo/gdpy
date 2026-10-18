@@ -77,6 +77,7 @@ const I18n = {
             'settings.logout': '退出登录',
             'settings.logoutDesc': '清除 Token 返回登录页',
             'settings.logoutConfirm': '确定退出登录吗？',
+            'settings.groupedHint': '设置项已按用途分组',
             // 右键菜单
             'menu.open': '打开',
             'menu.download': '下载',
@@ -459,6 +460,7 @@ const I18n = {
             'settings.logout': 'Logout',
             'settings.logoutDesc': 'Clear token and return to login',
             'settings.logoutConfirm': 'Are you sure you want to logout?',
+            'settings.groupedHint': 'Settings are grouped by purpose',
             // Context menu
             'menu.open': 'Open',
             'menu.download': 'Download',
@@ -781,9 +783,17 @@ const I18n = {
         this.apply();
     },
 
-    t(key) {
+    t(key, fallback) {
         const dict = this.translations[this.current] || this.translations['zh-CN'];
-        return dict[key] || key;
+        const v = dict[key];
+        if (v != null && v !== '') return v;
+        // 英文缺键时再试中文，避免界面上直接裸出 'settings.xxx'
+        const zh = this.translations['zh-CN'] && this.translations['zh-CN'][key];
+        if (zh != null && zh !== '') return zh;
+        if (fallback != null) return fallback;
+        // 没有 fallback：返回一个带点的键名会被 i18n-scan 当成「漏翻的键」清洗掉，
+        // 不会以 settings.groupedHint 这种形式露给用户。
+        return key;
     },
 
     setLang(lang) {
@@ -810,6 +820,20 @@ const I18n = {
         if (btn) {
             btn.textContent = this.current === 'zh-CN' ? '🌐 中' : '🌐 EN';
         }
+        // ★ 设置页、文件列表这些是 innerHTML 动态生成的，不跟着 data-i18n 走。
+        //   切语言时不重渲染，界面上就会留一大片旧语言 —— 这是「换英文后
+        //   一大堆没翻译」的根因之一（另一半是词典覆盖，见 i18n-scan.js）。
+        setTimeout(function () {
+            try {
+                var app = window.app, ui = window.ui;
+                if (app && ui) {
+                    var v = app._currentView;
+                    if (v === 'settings' && ui._renderSettingsView) ui._renderSettingsView();
+                    else if (ui.renderFiles) ui.renderFiles();
+                }
+                if (window.GdI18nScan && window.GdI18nScan.apply) window.GdI18nScan.apply();
+            } catch (e) { /* 重渲染失败不能影响语言切换本身 */ }
+        }, 0);
     },
 
     toggle() {

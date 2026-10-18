@@ -33,6 +33,8 @@ class App {
     showLogin() {
         document.getElementById('login-screen').classList.remove('hidden');
         document.getElementById('app').classList.add('hidden');
+        // 未登录：底部 tab 无处可去，整个藏起来
+        document.body.classList.add('gd-logged-out');
         this.ui?.renderSavedAccounts();
     }
     
@@ -40,6 +42,8 @@ class App {
     showApp() {
         document.getElementById('login-screen').classList.add('hidden');
         document.getElementById('app').classList.remove('hidden');
+        // 已登录：底部 tab 恢复
+        document.body.classList.remove('gd-logged-out');
     }
 
     // 显示应用版本号（从 script 标签提取）
@@ -88,7 +92,10 @@ class App {
         try {
             this.ui?.showToast(I18n.t('login.validating'), 'info');
             this.api = new GitHubAPI(token);
+            // 趁验证 token 的网络往返把非首屏模块拉下来，两边并行
+            const deferP = this.loadDeferred();
             const user = await this.api.getMe();
+            await deferP;
             this.storage.setToken(token);
             this.storage.setUser(user);
             this.storage.addAccount(token, user);
@@ -138,7 +145,48 @@ class App {
         });
     }
 
+    /**
+     * 加载非首屏模块（bridge / cangshu-link / maintain / share / plugin-api）。
+     *
+     * 这五个只有登录后才用得到，却占了约 141KB 源码。首屏（登录页）不加载它们，
+     * 打开页面的等待时间能短一截。
+     *
+     * ★ 串行插入而不是并行：script 标签并发插入时执行顺序不保证，
+     *   而这几个模块之间有隐式依赖（share 用到 github-api 的实例方法等）。
+     *   串行最多多花几个 RTT，且这段时间正好被 token 验证的网络请求盖住。
+     *
+     * ★ 单个失败只 warn 不 reject：启动流程不能因为一个可选模块 404 就卡死。
+     *   幂等 —— 重复调用返回同一个 Promise。
+     */
+    loadDeferred() {
+        if (this._deferPromise) return this._deferPromise;
+        const d = window.__GD_DEFER__;
+        if (!d || !d.files || !d.files.length) {
+            return (this._deferPromise = Promise.resolve());
+        }
+        this._deferPromise = new Promise((resolve) => {
+            let i = 0;
+            const next = () => {
+                if (i >= d.files.length) return resolve();
+                const name = d.files[i++];
+                const s = document.createElement('script');
+                s.src = d.url(name);
+                s.onload = next;
+                s.onerror = () => {
+                    console.warn('[defer] 模块加载失败，已跳过:', name);
+                    next();
+                };
+                document.head.appendChild(s);
+            };
+            next();
+        });
+        return this._deferPromise;
+    }
+
     async initializeWithToken(token) {
+        // 进入主界面前把非首屏模块补齐。login() 路径下这里通常已经完成了，
+        // 因为那边是和 token 验证并行启动的。
+        await this.loadDeferred();
         this.mountBridgeButton();
         if (!this.api) this.api = new GitHubAPI(token);
         // 设置限流警告回调
@@ -167,6 +215,10 @@ class App {
         this.showApp();
         // 更新仓库体积显示
         setTimeout(() => this.updateRepoSizeDisplay(), 1500);
+        // 启动后台整理的低频检查（每小时一次，配合事件触发的防抖调度）
+        this.startAutoCompactWatch?.();
+        // 登录后延迟评估一次：刚打开页面不太可能有正在跑的任务
+        setTimeout(() => { try { this.maybeAutoCompact('登录'); } catch (e) {} }, 20000);
 
         // 验证 token 有效性（401 说明 token 无效/过期，回登录页）
         try {
@@ -376,7 +428,7 @@ class App {
             this.ui.hideDownloadProgress();
             this.ui.showToast('下载完成', 'success');
         } catch (e) {
-            this.ui.hideDownloadProgress();
+            this.ui.hideDownloadProgress(true, e.message);
             this.ui.showToast(I18n.t('file.downloadFailed') + ': ' + e.message, 'error');
         }
     }
@@ -525,21 +577,84 @@ class App {
 
     async uploadFiles(files) {
         if (!files || files.length === 0) return;
-        this.ui.showUploadProgress?.(files);
+
+        // ── 上传前先查重（Windows 资源管理器风格）──
+        // 同名文件不直接覆盖：先问用户要替换 / 跳过 / 保留两个。
+        // 全程只弹一次，勾选"应用到全部"后按同一规则处理剩余冲突。
+        const targetPath = this.fileManager.currentPath;
+        const dupes = files.filter(f => this.storage.exists(
+            Storage.normalizePath(targetPath) + '/' + f.name));
+        let decision = { action: null, applyAll: false };
+
+        for (let i = 0; i < files.length; i++) {
+            const f = files[i];
+            const vp = Storage.normalizePath(targetPath) + '/' + f.name;
+            if (!this.storage.exists(vp)) continue;
+
+            if (!decision.applyAll) {
+                const existing = this.storage.getFile(vp);
+                const remaining = dupes.length - (decision.action ? 1 : 0);
+                const ans = await this.ui.showFileConflict({
+                    name: f.name,
+                    newSize: f.size,
+                    newDate: f.lastModified ? new Date(f.lastModified) : new Date(),
+                    oldSize: existing?.size || 0,
+                    oldDate: existing?.updatedAt ? new Date(existing.updatedAt) : null,
+                    remaining: remaining > 1 ? remaining : 0
+                });
+                decision = ans || { action: 'skip', applyAll: false };
+            }
+
+            if (decision.action === 'skip') {
+                this.ui.markUploadSkipped?.(f.name);
+                files[i]._gdAction = 'skip';
+            } else if (decision.action === 'rename') {
+                // 保留两个：自动改名 xxx (1).ext，仍可能撞就继续 +1
+                let n = 1, newName;
+                do {
+                    const dot = f.name.lastIndexOf('.');
+                    newName = dot > 0
+                        ? `${f.name.slice(0, dot)} (${n})${f.name.slice(dot)}`
+                        : `${f.name} (${n})`;
+                    n++;
+                } while (this.storage.exists(Storage.normalizePath(targetPath) + '/' + newName));
+                files[i]._gdNewName = newName;
+            } else {
+                files[i]._gdAction = 'replace';
+            }
+        }
+
+        const todo = files.filter(f => f._gdAction !== 'skip');
+        const skipped = files.length - todo.length;
+        if (todo.length === 0) {
+            this.ui.showToast(skipped ? `已跳过 ${skipped} 个同名文件` : '没有要上传的文件', 'info');
+            return;
+        }
+
+        this.ui.showUploadProgress?.(todo);
         try {
-            for (let i = 0; i < files.length; i++) {
-                await this.fileManager.uploadFile(files[i], this.fileManager.currentPath, (percent) => {
-                    this.ui.updateUploadProgress?.(i, percent, files.length);
+            for (let i = 0; i < todo.length; i++) {
+                const f = todo[i];
+                const uploadAs = f._gdNewName
+                    ? new File([f], f._gdNewName, { type: f.type, lastModified: f.lastModified })
+                    : f;
+                await this.fileManager.uploadFile(uploadAs, this.fileManager.currentPath, (percent) => {
+                    this.ui.updateUploadProgress?.(i, percent, todo.length);
                 });
                 this.ui.setUploadSuccess?.(i);
             }
-            this.ui.showToast(`成功上传 ${files.length} 个文件`, 'success');
+            const msg = skipped
+                ? `成功上传 ${todo.length} 个文件，跳过 ${skipped} 个同名文件`
+                : `成功上传 ${todo.length} 个文件`;
+            this.ui.showToast(msg, 'success');
             await this.loadFiles();
             // 显示成功状态 2 秒后自动关闭面板
             setTimeout(() => this.ui.hideUploadProgress?.(), 2000);
+            // 上传后可能新增了仓，顺带评估一次要不要后台整理（防抖 + 冷却，不会每次都跑）
+            this.scheduleAutoCompact();
         } catch (e) {
             this.ui.showToast(I18n.t('file.uploadFailed') + ': ' + e.message, 'error');
-            setTimeout(() => this.ui.hideUploadProgress?.(), 3000);
+            setTimeout(() => this.ui.hideUploadProgress?.(true, e.message), 3000);
         }
     }
 
@@ -604,9 +719,16 @@ class App {
         const shareDesc = document.getElementById('share-desc')?.value?.trim() || '';
         try {
             this.ui.closeModal();
-            // 专用进度弹窗替代 toast 刷屏：进度条 + 步骤，一目了然
-            this.ui.showShareProgress(files.length);
             const virtualPaths = files.map(f => f.path);
+            // ★ 文件夹要先展开才知道真实文件数，否则进度条按"1 个文件夹"
+            //   显示，实际在传 98 个文件，进度永远停在奇怪的位置
+            let totalFiles = 0;
+            try {
+                totalFiles = virtualPaths.reduce(
+                    (sum, vp) => sum + (this.shareManager._expandPath?.(vp).length || 1), 0);
+            } catch (e) { totalFiles = files.length; }
+            // 专用进度弹窗替代 toast 刷屏：进度条 + 步骤，一目了然
+            this.ui.showShareProgress(totalFiles || files.length);
             const result = await this.shareManager.shareByVirtualPaths(virtualPaths, shareName, shareDesc, (percent, msg) => {
                 this.ui.updateShareProgress(percent, msg);
             });
@@ -675,12 +797,104 @@ class App {
     }
 
     // ==================== 仪表盘概览 ====================
+    /**
+     * 兼容性自检：校验三件事。
+     *
+     * ★ 为什么要分别校验（历史教训）：
+     *
+     *   1) CSS 缓存版本号（--stamp）
+     *      GitHub Pages 的 CDN 会长时间缓存 css。曾经资源版本号写死在 ?v=58
+     *      后又连改 6 个版本没更新它，用户看到的界面比代码落后 7 个版本 ——
+     *      改了等于没改。
+     *
+     *   2) CSS 的 API 版本（--api-stamp）
+     *      ★ 这是最关键的一条，"文件是新的"不代表"能配合工作"。
+     *      例如 v68 的 CSS 靠 body.gd-logged-out 隐藏底部栏，而这个 class
+     *      是 v67 的 JS 才加的 —— 老 JS 配新 CSS，底部栏永远藏不掉。
+     *      反过来也一样：新 JS 调 ui.xxx() 而老 HTML 里没那个节点，点了没反应。
+     *
+     *   3) HTML 的 API 版本（body[data-api-v]）
+     *      index.html 和 js 是分开缓存的，同样可能错配。
+     *
+     * 保守原则：读不到就不猜。宁可不提示，也不误报 ——
+     * 一个假的"版本不兼容"会把用户吓到，而漏报只是偶尔样式不对。
+     */
+    checkCompatibility() {
+        try {
+            const want = String(window.APP_VERSION?.internalVersion || '').trim();
+            const wantApi = String(window.APP_VERSION?.apiVersion || '').trim();
+            if (!want && !wantApi) return;
+
+            let gotVer = null, gotApi = null;
+            for (const ss of document.styleSheets) {
+                let rules;
+                try { rules = ss.cssRules; } catch (e) { continue; }   // 跨域（jsdelivr 分支）读不到就跳过
+                if (!rules) continue;
+                for (const r of rules) {
+                    if (r.selectorText === '#gd-css-stamp') {
+                        gotVer = (r.style.getPropertyValue('--stamp') || '').trim().replace(/["']/g, '');
+                        gotApi = (r.style.getPropertyValue('--api-stamp') || '').trim().replace(/["']/g, '');
+                        break;
+                    }
+                }
+                if (gotVer || gotApi) break;
+            }
+
+            const problems = [];
+            // ① CSS 缓存版本落后 —— 只是旧，未必坏
+            if (gotVer && want && gotVer !== want) {
+                problems.push({ level: 'warn', text: `界面样式是旧版（缓存 ${gotVer}，最新 ${want}）` });
+            }
+            // ② CSS 契约不匹配 —— 真的会坏
+            if (gotApi && wantApi && gotApi !== wantApi) {
+                problems.push({ level: 'error',
+                    text: `样式与程序不兼容（样式 API ${gotApi}，程序 API ${wantApi}）` });
+            }
+            // ③ HTML 契约不匹配 —— 真的会坏
+            const htmlApi = (document.body?.getAttribute('data-api-v') || '').trim();
+            if (htmlApi && wantApi && htmlApi !== wantApi) {
+                problems.push({ level: 'error',
+                    text: `页面结构与程序不兼容（页面 API ${htmlApi}，程序 API ${wantApi}）` });
+            }
+
+            if (!problems.length) return;
+            const isErr = problems.some(p => p.level === 'error');
+            const bar = document.createElement('div');
+            bar.id = 'gd-compat-bar';
+            bar.innerHTML = (isErr ? '⚠️ ' : 'ℹ️ ') + problems.map(p => p.text).join('；')
+                + ' <button style="margin-left:8px;padding:2px 10px;border:none;border-radius:6px;'
+                + 'background:#fff;color:' + (isErr ? '#991b1b' : '#92400e') + ';font-weight:600;cursor:pointer;">强制刷新</button>';
+            bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99999;'
+                + 'background:' + (isErr ? '#fee2e2' : '#fef3c7') + ';color:' + (isErr ? '#991b1b' : '#92400e') + ';'
+                + 'font-size:12px;padding:8px 12px;text-align:center;'
+                + 'border-top:1px solid ' + (isErr ? '#fecaca' : '#fde68a') + ';';
+            bar.querySelector('button').onclick = () => location.reload(true);
+            document.body.appendChild(bar);
+        } catch (e) { /* 检测失败不能影响正常使用 */ }
+    }
+
+    /**
+     * 仪表盘
+     *
+     * ★ 为什么分两步渲染：
+     *   仓库容量要逐个仓库调 GitHub API（3 个仓 = 3 次往返，慢的一两秒）。
+     *   之前是 await 完再一次性出 HTML —— 这段时间整页是转圈的，
+     *   而文件数、类型分布这些数据全在 VFS 里，本地算一下就出来了，
+     *   根本没必要等网络。
+     *
+     * ★ 仓库那段为什么改写措辞：
+     *   原来写"共 3 个仓库 · 合计 1143.2 MB · 最大 995.2 MB（单仓建议 < 900 MB）"。
+     *   数字没错，但一进页面就看见两件事：数字很大、还超了建议值。
+     *   用户只会觉得"是不是要满了"，而实际上这是多仓分摊的正常结果。
+     *   现在主数字改成"还能写入多少"—— 这才是真正要关心的量。
+     */
     async showDashboard() {
         const container = document.getElementById('file-list');
         if (!container) return;
+        // 渲染前还原可见性（switchView 可能对非文件视图写过 display:none）
+        container.style.display = '';
         container.className = 'dashboard-view';
-        container.innerHTML = '<div style="text-align:center;padding:40px;color:#9ca3af;"><div class="spinner" style="margin:0 auto 12px;"></div>加载仪表盘...</div>';
-        
+
         const vfs = this.storage.getVFS();
         const files = Object.entries(vfs.files || {});
         const folders = Object.entries(vfs.folders || {});
@@ -694,32 +908,71 @@ class App {
             typeStats[ext] = (typeStats[ext] || 0) + 1;
         });
         const topTypes = Object.entries(typeStats).sort((a,b) => b[1]-a[1]).slice(0, 5);
-        const repoInfo = await this.getRepoSize().catch(() => null);
-        
-        const html = '<div style="padding:20px;max-width:1200px;margin:0 auto;">' +
-            '<h2 style="font-size:22px;font-weight:700;margin-bottom:20px;color:#111827;">📊 仪表盘</h2>' +
+
+        // ① 先出 UI —— 全部来自本地 VFS，不含任何网络等待
+        const fmtGB = mb => (mb >= 1024 ? (mb/1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB');
+        container.innerHTML = '<div style="padding:20px;max-width:1200px;margin:0 auto;">' +
+            '<h2 style="font-size:22px;font-weight:700;margin-bottom:20px;color:var(--text-primary);">📊 仪表盘</h2>' +
             '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;">' +
-            '<div style="padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(102,126,234,0.3);"><div style="font-size:32px;font-weight:700;">' + files.length + '</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">📄 文件总数</div></div>' +
-            '<div style="padding:20px;background:linear-gradient(135deg,#f093fb,#f5576c);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(240,147,251,0.3);"><div style="font-size:32px;font-weight:700;">' + folders.length + '</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">📁 文件夹</div></div>' +
-            '<div style="padding:20px;background:linear-gradient(135deg,#4facfe,#00f2fe);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(79,172,254,0.3);"><div style="font-size:28px;font-weight:700;">' + (totalSize/1024/1024).toFixed(1) + ' MB</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">💾 本地缓存</div></div>' +
-            '<div style="padding:20px;background:linear-gradient(135deg,#43e97b,#38f9d7);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(67,233,123,0.3);"><div style="font-size:32px;font-weight:700;">' + favorites.length + '</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">⭐ 收藏</div></div></div>' +
+            '<div class="dash-card" style="padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(102,126,234,0.3);"><div class="dash-num" data-count="' + files.length + '" style="font-size:32px;font-weight:700;">' + files.length + '</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">📄 文件总数</div></div>' +
+            '<div class="dash-card" style="padding:20px;background:linear-gradient(135deg,#f093fb,#f5576c);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(240,147,251,0.3);"><div class="dash-num" data-count="' + folders.length + '" style="font-size:32px;font-weight:700;">' + folders.length + '</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">📁 文件夹</div></div>' +
+            '<div class="dash-card" style="padding:20px;background:linear-gradient(135deg,#4facfe,#00f2fe);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(79,172,254,0.3);"><div class="dash-num" data-count="' + (totalSize/1024/1024).toFixed(1) + '" data-suffix=" MB" style="font-size:28px;font-weight:700;">' + (totalSize/1024/1024).toFixed(1) + ' MB</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">📦 文件总大小</div></div>' +
+            '<div class="dash-card" style="padding:20px;background:linear-gradient(135deg,#43e97b,#38f9d7);border-radius:16px;color:#fff;box-shadow:0 4px 12px rgba(67,233,123,0.3);"><div class="dash-num" data-count="' + favorites.length + '" style="font-size:32px;font-weight:700;">' + favorites.length + '</div><div style="font-size:13px;opacity:0.9;margin-top:4px;">⭐ 收藏</div></div></div>' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">' +
-            '<div style="padding:20px;background:#fff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,0.04);">' +
-            '<div style="font-size:16px;font-weight:600;margin-bottom:16px;color:#111827;">📦 GitHub 仓库存储</div>' +
-            (repoInfo ? '<div style="font-size:14px;color:#6b7280;line-height:1.8;">仓库: ' + repoInfo.name + '<br>大小: ' + repoInfo.sizeMB + ' MB<br>分支: main</div>' : '<div style="font-size:14px;color:#9ca3af;">加载中...</div>') +
+            '<div class="dash-panel" style="padding:20px;background:#fff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,0.04);">' +
+            '<div style="font-size:16px;font-weight:600;margin-bottom:16px;color:var(--text-primary);">📦 GitHub 仓库存储</div>' +
+            '<div id="dash-repo-box"><div style="font-size:13px;color:#9ca3af;">正在读取仓库容量…</div></div>' +
             '</div>' +
-            '<div style="padding:20px;background:#fff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,0.04);">' +
-            '<div style="font-size:16px;font-weight:600;margin-bottom:16px;color:#111827;">📊 文件类型分布</div>' +
+            '<div class="dash-panel" style="padding:20px;background:#fff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,0.04);">' +
+            '<div style="font-size:16px;font-weight:600;margin-bottom:16px;color:var(--text-primary);">📊 文件类型分布</div>' +
             (files.length > 0 ? topTypes.map(([ext, count]) => {
                 const pct = (count/files.length*100).toFixed(1);
                 return '<div style="margin-bottom:12px;"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;"><span style="color:#374151;">.' + ext + '</span><span style="color:#6b7280;">' + count + ' (' + pct + '%)</span></div><div style="height:8px;background:#f3f4f6;border-radius:4px;overflow:hidden;"><div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#667eea,#764ba2);border-radius:4px;transition:width 0.3s;"></div></div></div>';
             }).join('') : '<div style="font-size:13px;color:#9ca3af;">暂无文件</div>') +
             '</div></div>' +
-            '<div style="margin-top:20px;padding:20px;background:#fff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,0.04);">' +
-            '<div style="font-size:16px;font-weight:600;margin-bottom:16px;color:#111827;">🕐 最近使用</div>' +
+            '<div class="dash-panel" style="margin-top:20px;padding:20px;background:#fff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,0.04);">' +
+            '<div style="font-size:16px;font-weight:600;margin-bottom:16px;color:var(--text-primary);">🕐 最近使用</div>' +
             (recent.length > 0 ? recent.slice(0,8).map(p => '<div style="display:flex;align-items:center;padding:10px 12px;background:#f9fafb;border-radius:8px;margin-bottom:6px;cursor:pointer;" onclick="app.openFileByPath(\'' + p + '\')"><span style="margin-right:8px;">📄</span><span style="font-size:13px;color:#374151;">' + p.split('/').pop() + '</span><span style="margin-left:auto;font-size:11px;color:#9ca3af;">' + p + '</span></div>').join('') : '<div style="font-size:13px;color:#9ca3af;text-align:center;padding:20px;">暂无最近文件</div>') +
             '</div></div>';
-        container.innerHTML = html;
+
+        // ② 再补数字 —— 网络好了就填进去，失败也不影响上面已经能看的部分
+        const box = document.getElementById('dash-repo-box');
+        if (!box) return;
+        const repoInfo = await this.getRepoSize().catch(() => null);
+        // ★ 用户可能已经切走了；容器也可能被别的视图复用 —— 两种情况都不能写
+        if (!box.isConnected) return;
+        if (!repoInfo) {
+            box.innerHTML = '<div style="font-size:13px;color:#9ca3af;">仓库容量暂时读不到（不影响使用）</div>';
+            return;
+        }
+
+        const warnMB = repoInfo.warnMB || 900;
+        // 可写 = 每个仓各自还剩多少，加起来；不是"总容量 - 总已用"，
+        // 后者会把某个仓超出的部分从别的仓的空余里扣掉，算出来偏悲观
+        const remainMB = (repoInfo.repos || []).reduce(
+            (s, r) => s + Math.max(0, warnMB - r.sizeMB), 0);
+        const usedMB = parseFloat(repoInfo.sizeMB) || 0;
+        const capMB = warnMB * (repoInfo.repoCount || 1);
+        const pct = capMB > 0 ? Math.min(100, usedMB / capMB * 100) : 0;
+
+        let tone = '#2563eb', note = '';
+        if (remainMB < 200) {
+            tone = '#dc2626';
+            note = '<div style="margin-top:8px;font-size:12px;color:#b91c1c;">空间不多了，继续上传会自动新建仓库。</div>';
+        } else if (remainMB < 600) {
+            tone = '#d97706';
+            note = '<div style="margin-top:8px;font-size:12px;color:#b45309;">还剩一些，接近时会自动新建仓库。</div>';
+        }
+
+        box.innerHTML =
+            '<div class="dash-num" data-count="' + remainMB.toFixed(1) + '" data-suffix=" MB" data-form="gb" style="font-size:28px;font-weight:700;color:' + tone + ';line-height:1.1;">'
+          +   fmtGB(remainMB) + '</div>'
+          + '<div style="font-size:13px;color:#6b7280;margin-top:4px;">还能写入</div>'
+          + '<div style="height:6px;background:#f3f4f6;border-radius:3px;overflow:hidden;margin:12px 0 8px;">'
+          +   '<div style="height:100%;width:' + pct.toFixed(1) + '%;background:' + tone + ';"></div></div>'
+          + '<div style="font-size:12px;color:#6b7280;">'
+          +   repoInfo.repoCount + ' 个仓库 · 已用 ' + fmtGB(usedMB)
+          + '</div>' + note;
     }
 
     // ==================== 文件标签管理 ====================
@@ -1043,10 +1296,57 @@ class App {
         try {
             const remote = await this.shareManager.listMyShares();
             this.ui.showShareList?.(this._mergeShares(local, remote));
+            // 远端已被删掉的分享，本地记录会变成点不开的"鬼影"，顺手清掉
+            this._pruneDeadShares(local, remote);
         } catch (e) {
             console.warn('拉取远程分享失败:', e.message);
             // 远程失败就只用本地，不打断用户
             this.ui.showShareList?.(local);
+        }
+    }
+
+    /**
+     * 清理本地已失效的分享记录。
+     *
+     * 分享仓库在 GitHub 上被删掉后，localStorage 里的记录还在，
+     * 于是"我的分享"会一直显示一堆点不开的卡片（标着已丢失）。
+     *
+     * ★ 必须先确认仓库是真的不存在，不能因为远程列表没返回就删 ——
+     *   GitHub 搜索/列表接口有延迟，刚分享完的仓库可能暂时查不到，
+     *   那种情况删掉本地记录等于把用户刚做的分享抹了。
+     */
+    async _pruneDeadShares(local, remote) {
+        const remoteNames = new Set((remote || []).map(r => r.repoName));
+        const suspects = (local || []).filter(l => l.repoName && !remoteNames.has(l.repoName));
+        if (!suspects.length) return;
+        try {
+            const username = await this.api.getUsername();
+            const dead = [];
+            // 并发 4，避免分享多时打爆限流
+            const queue = suspects.slice();
+            const worker = async () => {
+                while (queue.length) {
+                    const s = queue.shift();
+                    try {
+                        // 404 会抛错，所以正常返回就说明仓库还在
+                        // （只是列表接口暂时没返回它，不能删）
+                        await this.api.request(`/repos/${username}/${s.repoName}`, { retry: 1 });
+                    } catch (e) {
+                        if (e.status === 404 || /404|Not Found/i.test(String(e.message))) dead.push(s);
+                    }
+                }
+            };
+            await Promise.all([0, 1, 2, 3].map(worker));
+            if (!dead.length) return;
+            for (const s of dead) {
+                if (s.id) this.storage.removeShare(s.id);
+            }
+            console.log(`[Share] 已清理 ${dead.length} 条失效的本地分享记录`);
+            // 用清理后的数据重渲染
+            const fresh = this.storage.getShares() || [];
+            this.ui.showShareList?.(this._mergeShares(fresh, remote));
+        } catch (e) {
+            console.warn('清理失效分享记录失败:', e.message);
         }
     }
 
@@ -1135,37 +1435,77 @@ class App {
     // ==================== 后端服务配置 ====================
     // ==================== 仓库体积监控 ====================
     
+    /**
+     * 仓库体积统计。
+     *
+     * ★ 必须逐仓返回，不能只给一个总数 ——
+     *
+     *   之前把 5 个仓库的体积**相加**，再拿这个总数去跟"单仓 1GB"比：
+     *     5 个仓加起来 1040 MB → 弹"仓库体积已达 1040MB，接近 1GB 上限"
+     *   但 1GB 是 GitHub 的**单仓**建议值，最大的那个仓也才 806MB，
+     *   根本没有哪个仓接近上限。于是警告和真实容量状况互相矛盾：
+     *   界面喊满了，自动建仓却正确地认为自己不该建。
+     *
+     * ★ 还有一个更隐蔽的点：GitHub 的 repo.size 是**磁盘占用**，
+     *   包含全部 git 历史对象。覆盖上传、删孤儿都是靠新提交实现的，
+     *   旧 blob 仍留在历史里 —— 实测某仓当前文件 806MB，repo.size 却是 996MB，
+     *   多出来的 190MB 就是历史。所以它不能当作"还能不能往里写"的依据，
+     *   那个判断必须看 repoUsage（Drive 自己记的当前内容量）。
+     *
+     * @returns {{repos:Array, repoCount:number, sizeMB:string, largestMB:number, largestName:string, overRepos:Array}}
+     */
     async getRepoSize() {
         // 如果之前已经失败过，直接返回，避免重复请求
         if (this._repoSizeFailed) return null;
         try {
             const owner = this.storage.getUser()?.login;
             if (!owner) return null;
-            
+
             // 优先访问存储仓库（drive-storage-*），而不是默认的 github_drive
             const repos = this.storage.getRepos();
             if (repos.length === 0) return null;
-            
-            // 计算所有存储仓库的总体积
+
+            const list = [];
             let totalSize = 0;
-            let repoCount = 0;
             for (const repo of repos) {
                 try {
                     const repoInfo = await this.api.getRepository(repo.owner, repo.repo);
-                    totalSize += repoInfo.size || 0;
-                    repoCount++;
+                    const kb = repoInfo.size || 0;
+                    totalSize += kb;
+                    list.push({
+                        owner: repo.owner,
+                        repo: repo.repo,
+                        sizeKB: kb,
+                        sizeMB: kb / 1024,
+                        isDefault: !!repo.isDefault
+                    });
                 } catch (e) {
                     console.debug('获取仓库体积失败:', repo.repo, e.message);
                 }
             }
-            
-            if (repoCount === 0) return null;
-            
+
+            if (list.length === 0) return null;
+            list.sort((a, b) => b.sizeKB - a.sizeKB);
+            const largest = list[0];
+            // 单仓预警线：GitHub 建议 1GB，Drive 自己的 maxRepoSize 默认 900MB
+            const cfg = this.storage.getStorageConfig();
+            const warnMB = (cfg && cfg.maxRepoSize ? cfg.maxRepoSize / 1048576 : 900);
+            const over = list.filter(r => r.sizeMB >= warnMB);
+
             return {
+                repos: list,
+                overRepos: over,
+                warnMB: warnMB,
+                largestMB: parseFloat(largest.sizeMB.toFixed(1)),
+                largestName: largest.repo,
                 size: totalSize, // KB
                 sizeMB: (totalSize / 1024).toFixed(1),
                 sizeGB: (totalSize / (1024 * 1024)).toFixed(2),
-                name: `${repoCount} 个存储仓库`,
+                name: `${list.length} 个存储仓库`,
+                // ★ 调用方（顶部显示、仓库管理面板）读的是 repoCount，
+                //   而这里只给了 name 字符串 —— 于是界面显示"共 undefined 个仓库"。
+                //   总数明明算对了（sizeMB 正确），就差这个字段。
+                repoCount: list.length,
                 full_name: `${owner}/drive-storage-*`
             };
         } catch (e) {
@@ -1233,7 +1573,7 @@ class App {
                 '<div style="font-size:12px;color:#6b7280;">文件夹数</div></div>' +
                 '<div style="text-align:center;padding:16px;background:#fef3c7;border-radius:12px;">' +
                 '<div style="font-size:24px;font-weight:700;color:#d97706;">' + (totalSize/1024/1024).toFixed(2) + 'MB</div>' +
-                '<div style="font-size:12px;color:#6b7280;">本地缓存</div></div></div>' +
+                '<div style="font-size:12px;color:#6b7280;">文件总大小</div></div></div>' +
                 '<div style="margin-bottom:16px;"><div style="font-size:14px;font-weight:600;color:#374151;margin-bottom:8px;">📦 仓库存储</div>' + repoHtml + '</div>' +
                 '<div><div style="font-size:14px;font-weight:600;color:#374151;margin-bottom:8px;">📊 文件类型分布</div>' +
                 (sortedTypes.length > 0 ? typeHtml : '<div style="font-size:13px;color:#9ca3af;">暂无文件</div>') +
@@ -1252,26 +1592,454 @@ class App {
         }
     }
 
+    /**
+     * 顶部仓库体积显示。
+     *
+     * ★ 判断基准是**单个仓库**，不是所有仓库之和 ——
+     *   1GB 是 GitHub 的单仓建议值。以前拿总数去比，5 个仓一共 1040MB
+     *   就弹红字"接近 1GB 上限"，可实际上没有一个仓真的满了。
+     *
+     * ★ 显示的是合计、预警的是单仓，两个数都要给，否则用户还是看不懂。
+     */
     async updateRepoSizeDisplay() {
         const info = await this.getRepoSize();
         const el = document.getElementById('repo-size-display');
         if (!el || !info) return;
-        const sizeMB = parseFloat(info.sizeMB);
+
+        const warnMB = info.warnMB || 900;
+        const maxMB = info.largestMB || 0;
         let color = '#6b7280';
         let warning = '';
-        if (sizeMB > 900) {
+        if (info.overRepos && info.overRepos.length) {
             color = '#dc2626';
-            warning = ' ⚠️ 接近上限';
-        } else if (sizeMB > 500) {
+            warning = ' ⚠️ 有仓库接近上限';
+        } else if (maxMB > warnMB * 0.6) {
             color = '#f59e0b';
             warning = ' ⚠️';
         }
         el.innerHTML = `<span style="color:${color};">📦 ${info.sizeMB} MB${warning}</span>`;
-        el.title = `仓库：${info.full_name}
-体积：${info.sizeMB} MB (${info.sizeGB} GB)
-GitHub 建议不超过 1 GB`;
-        if (sizeMB > 900) {
-            this.ui?.showToast(`⚠️ 仓库体积已达 ${info.sizeMB} MB，接近 1 GB 上限！建议清理历史记录或迁移部分文件`, 'error');
+        el.title =
+            `${info.repoCount} 个存储仓库，合计 ${info.sizeMB} MB（含 git 历史）\n` +
+            `最大的一个：${info.largestName} = ${info.largestMB} MB\n` +
+            `单仓建议不超过 ${Math.round(warnMB)} MB\n\n` +
+            `注：合计是所有仓库相加，不代表某个仓库快满了。`;
+
+        if (info.overRepos && info.overRepos.length) {
+            const names = info.overRepos.map(r => `${r.repo} (${r.sizeMB.toFixed(0)} MB)`).join('、');
+            this.ui?.showToast(
+                `⚠️ ${names} 体积接近 ${Math.round(warnMB)} MB，新文件会自动写到别的仓库`, 'error');
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // ★ v0.0.63/64 的两次纠错：目标搞错过，算法也搞错过
+    //
+    //   第一错（v0.0.63）：“减少仓库数量” 就是收益。
+    //     错。每个仓就是一份 900MB 额度，仓少了额度也少。
+    //     但用户真正在意的是"仓越少越好、别留半空的仓"，
+    //     额度少一点也不在乎 —— 空仓随时能自动重建。
+    //     ⇒ 是我把"额度"当成了目标，用户要的是"紧凑"。
+    //
+    //   第二错（v0.0.64）：按整个仓装箱。
+    //     8696 剩 94MB，c4aa 有 124MB → 124 装不进 94 → c4aa 独立成仓。
+    //     结果 8696 永远停在 806MB 填不满，仓数也降不下去。
+    //     ⇒ 改成**按分片**装箱：拿每个仓的剩余空间去挑分片塞，
+    //       大分片优先。真实数据实测：
+    //         8696  806 MB → 900 MB（填满）
+    //         c4aa  124 MB →  30 MB
+    //         3039    0 MB → 删除
+    //         3 个仓 → 2 个，迁移仅 94MB。
+    //
+    //   ★ 只从后面的仓往前面的仓搬，绝不倒过来 ——
+    //     否则大仓数据往小仓倒，迁移量暴涨且来回震荡，不收敛。
+    // ───────────────────────────────────────────────────────────────
+
+    // ==================== 自动整理（后台，无需手动） ====================
+    /**
+     * 自动整理调度：空闲时默默把零散的小仓并进大仓。
+     *
+     * 用户原话："不能自动定时后台转移吗，让我手动转移这很费脑子"。
+     * 确实 —— 整理是个"什么时候做都行、但没人愿意惦记"的事。
+     *
+     * ★ 触发条件必须严格，否则会变成骚扰：
+     *     1) 开关打开（默认开）
+     *     2) 仓数 ≥ 3（2 个仓没什么好整的）
+     *     3) 整理后确实能少一个仓
+     *     4) 迁移量 ≤ 阈值（默认 300MB）—— 大了就别在后台默默搬
+     *     5) 距上次 ≥ 24 小时（同一天反复触发说明条件没变，做了也白做）
+     *     6) 当前没有正在跑的上传/下载/分享
+     *
+     * ★ 为什么不用 setInterval 硬轮询：
+     *   页面可能挂一整天，硬轮询会一直消耗配额。
+     *   这里用「事件触发 + 防抖 + 冷却」：上传/删除之后才评估，
+     *   外加一个低频的兜底检查（页面开着时每小时一次）。
+     */
+    scheduleAutoCompact() {
+        clearTimeout(this._autoCompactTimer);
+        // 防抖 8 秒：连续上传 10 个文件只评估一次，不是每个都评估
+        this._autoCompactTimer = setTimeout(() => {
+            this.maybeAutoCompact('自动');
+        }, 8000);
+    }
+
+    /** 页面开着时的低频兜底检查（每小时一次） */
+    startAutoCompactWatch() {
+        if (this._autoCompactWatch) return;
+        this._autoCompactWatch = setInterval(() => {
+            try { this.maybeAutoCompact('定时'); } catch (e) { /* 后台任务不打扰用户 */ }
+        }, 60 * 60 * 1000);
+    }
+
+    /**
+     * 评估并执行自动整理。
+     * @param {string} reason - 触发原因（写进任务标题，方便回溯）
+     */
+    async maybeAutoCompact(reason = '自动') {
+        if (this._compactRunning) return null;
+        const cfg = this.storage.getStorageConfig() || {};
+        // v0.0.64：算法修正后重新默认开启（见文末说明）
+        if (cfg.autoCompact === false) return null;
+
+        // 冷却
+        const HOUR = 3600 * 1000;
+        const coolH = cfg.autoCompactCooldownHours || 24;
+        if (cfg.lastAutoCompactAt && (Date.now() - cfg.lastAutoCompactAt) < coolH * HOUR) {
+            return null;
+        }
+        // 忙的时候不添乱
+        if (this._busyCount && this._busyCount > 0) return null;
+
+        let plan;
+        try {
+            plan = this.fileManager.planRepoCompaction();
+        } catch (e) {
+            return null;
+        }
+        if (!plan || !plan.moves.length) return null;
+        if (plan.beforeCount < 3) return null;
+        if (plan.beforeCount - plan.afterCount < 1) return null;
+
+        const maxMoveMB = cfg.autoCompactMaxMoveMB || 300;
+        if (plan.moveBytes > maxMoveMB * 1048576) {
+            console.log(`[AutoCompact] 迁移量 ${(plan.moveBytes/1048576).toFixed(0)}MB 超过 ${maxMoveMB}MB，跳过`);
+            return null;
+        }
+
+        return await this.runAutoCompact(plan, reason);
+    }
+
+    /** 执行自动整理（接进任务坞，让用户看得见但不是必须盯着） */
+    async runAutoCompact(plan, reason = '自动') {
+        this._compactRunning = true;
+        const MB = n => (n / 1048576).toFixed(1);
+        const cfg = this.storage.getStorageConfig() || {};
+        // ★ 自动整理默认**不删仓库**，只迁移。
+        //   迁移是可控的（数据还在源仓），删仓不可逆。
+        //   腾空的仓会在下次手动整理时列出，或者用户打开开关才自动删。
+        const doDelete = cfg.autoCompactDelete === true;
+
+        let taskId = null;
+        if (typeof TaskDock !== 'undefined' && TaskDock.create) {
+            const t = TaskDock.create({
+                type: 'compact',
+                title: `🧹 整理仓库（${reason}）`,
+                items: [...new Set(plan.moves.map(m => `${m.from.repo} → ${m.to.repo}`))],
+                note: `${plan.beforeCount} 个仓 → ${plan.afterCount} 个 · ${MB(plan.moveBytes)} MB`,
+                expand: false   // ★ 后台任务默认收成小窗，不打断当前操作
+            });
+            taskId = t && t.id;
+        }
+
+        try {
+            const res = await this.fileManager.compactRepos(plan, (stage, done, total, msg) => {
+                if (taskId && TaskDock.setPercent) {
+                    const pct = total ? Math.round(done / total * 100) : 0;
+                    TaskDock.setPercent(taskId, pct);
+                    TaskDock.setNote?.(taskId, `${msg}（${done}/${total}）`);
+                }
+            }, doDelete);
+
+            // 记时间，避免同一天反复跑
+            const c = this.storage.getStorageConfig() || {};
+            c.lastAutoCompactAt = Date.now();
+            this.storage.updateStorageConfig?.(c);
+            try { await this.configSync?.pushConfig?.(); } catch (e) { /* 稍后自动同步 */ }
+
+            if (taskId && TaskDock.finish) {
+                TaskDock.finish(taskId, true,
+                    `迁移 ${res.moved} 片` + (res.deleted.length ? `，删除 ${res.deleted.length} 个空仓` : '（源仓保留）'));
+            }
+            if (res.moved) await this.loadFiles?.();
+            return res;
+        } catch (e) {
+            if (taskId && TaskDock.finish) TaskDock.finish(taskId, false, e.message);
+            console.warn('[AutoCompact] 整理失败（源数据未受影响）:', e.message);
+            return null;
+        } finally {
+            this._compactRunning = false;
+        }
+    }
+
+    // ==================== 存储仓库管理 ====================
+    /**
+     * 存储仓库管理。
+     *
+     * 用户看到"仓库快 1GB 了"却找不到任何能操作的地方 ——
+     *   没有逐仓用量、没有新建仓库按钮、没有校准入口，
+     *   连那句"建议清理或迁移"也只是句话，点了没反应。
+     * 这里补上：逐仓用量条 + 新建 / 设为默认 / 校准。
+     */
+    async showStorageManager() {
+        const box = document.getElementById('storage-mgr-body');
+        if (!box) return;
+        box.innerHTML = '<div style="font-size:13px;color:#6b7280;">正在读取仓库体积…</div>';
+        const info = await this.getRepoSize();
+        if (!info) {
+            box.innerHTML = '<div style="font-size:13px;color:#dc2626;">读取失败，请稍后重试</div>';
+            return;
+        }
+        this._storageInfo = info;
+        const warnMB = info.warnMB || 900;
+        const cfg = this.storage.getStorageConfig();
+
+        let h = '<div style="font-size:13px;line-height:1.7;">';
+        h += `<div style="color:#6b7280;margin-bottom:10px;">
+                ${info.repoCount} 个存储仓库，合计 <b>${info.sizeMB} MB</b>（该数字含 git 历史）。
+                <div style="font-size:12px;margin-top:4px;">
+                单仓建议不超过 <b>${Math.round(warnMB)} MB</b>；超过的仓库不再写入，新文件会自动落到别的仓库。</div>
+              </div>`;
+
+        for (const r of info.repos) {
+            const pct = Math.min(100, r.sizeMB / warnMB * 100);
+            const over = r.sizeMB >= warnMB;
+            const color = over ? '#dc2626' : (pct > 60 ? '#f59e0b' : '#2563eb');
+            h += `<div style="padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:8px;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span style="font-size:13px;font-weight:600;color:#1f2937;">${r.repo}</span>
+                    ${r.isDefault ? '<span style="font-size:11px;background:#eef2ff;color:#4338ca;padding:1px 7px;border-radius:999px;">默认</span>' : ''}
+                    <span style="margin-left:auto;font-size:12px;color:${color};font-weight:600;">${r.sizeMB.toFixed(1)} MB</span>
+                </div>
+                <div style="height:6px;background:#f3f4f6;border-radius:3px;overflow:hidden;margin:6px 0;">
+                    <div style="height:100%;width:${pct.toFixed(1)}%;background:${color};"></div>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    ${r.isDefault ? '' : `<button class="btn-secondary btn-sm" onclick="app.setDefaultStorageRepo('${r.owner}','${r.repo}')">设为默认</button>`}
+                    <button class="btn-secondary btn-sm" onclick="app.openRepoOnGithub('${r.owner}','${r.repo}')">在 GitHub 打开</button>
+                </div>
+              </div>`;
+        }
+
+        h += `<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn-primary btn-sm" onclick="app.createStorageRepoNow()">➕ 新建存储仓库</button>
+                <button class="btn-secondary btn-sm" onclick="app.showRepoCompaction()">🧹 整理合并</button>
+                <button class="btn-secondary btn-sm" onclick="app.quickRecalibrate()">🔧 校准用量登记</button>
+                <button class="btn-secondary btn-sm" onclick="ui.closeModal();ui.showStorageOptimizer();">⚡ 清理孤儿</button>
+              </div>`;
+        h += `<div style="font-size:12px;color:#9ca3af;margin-top:10px;line-height:1.6;">
+                自动建仓：<b>${cfg.autoCreateRepo ? '已开启' : '已关闭'}</b>，单仓上限 ${Math.round(warnMB)} MB。<br>
+                ★ 自动建仓是「<b>所有仓都满了</b>」才触发 —— 只要还有一个仓有空位就往里写，
+                这是对的，否则会平白多出一堆半空仓库。想要减少仓数用「🧹 整理合并」。</div>`;
+        h += '</div>';
+        box.innerHTML = h;
+    }
+
+    /**
+     * 整理合并：把零散的小仓并进大仓，删掉腾空的仓。
+     *
+     * 用户问："仓库存储过剩，不就合并文件到几个仓库，删除其他仓库？"
+     * —— 对，但必须先看方案再执行，而且执行顺序不能反
+     *    （先写目标 → 校验 → 改 VFS → 才删源）。
+     */
+    /** 取单仓上限（MB 换算用） */
+    _cfgMaxRepoSize() {
+        try {
+            const c = this.storage.getStorageConfig?.();
+            return (c && c.maxRepoSize) || 900 * 1048576;
+        } catch (e) { return 900 * 1048576; }
+    }
+    _cfg_max() { return this._cfgMaxRepoSize(); }
+
+    async showRepoCompaction() {
+        const box = document.getElementById('storage-mgr-body');
+        if (box) box.innerHTML = '<div style="font-size:13px;color:#6b7280;">正在分析…</div>';
+
+        let plan;
+        try {
+            plan = this.fileManager.planRepoCompaction();
+        } catch (e) {
+            if (box) box.innerHTML = `<div style="color:#dc2626;">分析失败：${e.message}</div>`;
+            return;
+        }
+
+        const MB = n => (n / 1048576).toFixed(1);
+        // ★ 有分片要搬 **或** 有空仓可删，都算"有得整"
+        const canMerge = plan.moves.length > 0 || (plan.deletable && plan.deletable.length > 0);
+        const maxMB = Math.round(this._cfgMaxRepoSize() / 1048576);
+        const capBefore = plan.beforeCount * maxMB;
+        const capAfter = plan.afterCount * maxMB;
+
+        // 目标（v0.0.64 按用户意图重定）：**把仓填满，腾空的删掉**。
+        //   不是"把小仓并进大仓就完事"，而是真正把大仓的剩余空间塞满。
+        //
+        // 代价要写清楚：每个仓就是一份额度，删掉空仓 = 少一份额度。
+        //   但空仓随时能自动重建，所以这个代价实际很小 —— 不再劝阻。
+        const capWarn = canMerge
+            ? `<div style="padding:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;margin-bottom:12px;color:#1e40af;">
+                 <b>整理方式：填满大仓 → 删除腾空的仓</b><br>
+                 <span style="font-size:12px;line-height:1.6;">
+                 按分片搬运，把排在前面的仓尽量塞到 ${maxMB} MB，
+                 剩下的往后堆，最后把<b>归零的仓删掉</b>。<br>
+                 整理后 ${plan.afterCount} 个仓 ≈ ${(capAfter / 1024).toFixed(1)} GB 额度
+                 （现在 ${(capBefore / 1024).toFixed(1)} GB）。
+                 额度变少不影响使用 —— 需要时会自动建新仓。
+                 </span>
+               </div>`
+            : '';
+
+        let h = '<div style="font-size:13px;line-height:1.7;">';
+        h += capWarn;
+        if (!canMerge) {
+            h += `<div style="padding:14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;color:#166534;">
+                    ✓ 没有需要整理的 —— ${plan.beforeCount} 个仓分布合理，没有能合并的零散空间。
+                  </div>`;
+        } else {
+            h += `<div style="padding:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;margin-bottom:12px;">
+                    <b>${plan.beforeCount} 个仓 → ${plan.afterCount} 个</b>，
+                    ${plan.moves.length ? `需迁移 <b>${MB(plan.moveBytes)} MB</b>（${plan.moves.length} 个分片）` : '无需迁移分片'}
+                    ，然后删除 ${plan.deletable.length} 个腾空的仓。
+                  </div>`;
+            h += '<div style="font-size:12px;color:#6b7280;margin-bottom:6px;">'
+               +  '搬运路线（按分片，从后面的仓往前填）：</div>';
+            // ★ moves 是分片级，同一对 (from,to) 会有几十条，必须聚合后再显示
+            const agg = new Map();
+            for (const m of plan.moves) {
+                const k = m.from.key + '=>' + m.to.key;
+                if (!agg.has(k)) agg.set(k, { from: m.from, to: m.to, bytes: 0, n: 0 });
+                const a = agg.get(k); a.bytes += m.size; a.n++;
+            }
+            for (const a of agg.values()) {
+                h += `<div style="padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:6px;font-size:12px;">
+                        <span style="color:#1f2937;font-weight:600;">${a.from.repo}</span>
+                        <span style="color:#9ca3af;"> (${a.n} 片 · ${MB(a.bytes)} MB)</span>
+                        <span style="color:#6b7280;"> → </span>
+                        <span style="color:#2563eb;font-weight:600;">${a.to.repo}</span>
+                      </div>`;
+            }
+            h += `<div style="font-size:12px;color:#6b7280;margin-top:10px;line-height:1.6;background:#f9fafb;padding:10px;border-radius:8px;">
+                    安全保证：先把分片写进目标仓 → 逐片用 <b>sha 校验字节一致</b> →
+                    全部通过才改记录 → 最后删源仓。<br>
+                    任何一步失败都会中止，<b>源数据不受影响</b>。
+                  </div>`;
+        }
+
+        h += `<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
+                ${canMerge ? `<button class="btn-primary btn-sm" onclick="app.runRepoCompaction()">${
+                    plan.moves.length
+                        ? `开始整理（${plan.moves.length} 片 · ${MB(plan.moveBytes)} MB）`
+                        : `删除 ${plan.deletable.length} 个空仓`}</button>` : ''}
+                <button class="btn-secondary btn-sm" onclick="app.showStorageManager()">返回</button>
+              </div>`;
+        h += '</div>';
+
+        this._compactPlan = plan;
+        if (box) box.innerHTML = h;
+    }
+
+    /** 执行整理合并 */
+    async runRepoCompaction() {
+        const plan = this._compactPlan;
+        if (!plan || !plan.moves.length) return;
+        const box = document.getElementById('storage-mgr-body');
+        const MB = n => (n / 1048576).toFixed(1);
+
+        const okDel = confirm(
+            `将把 ${plan.moves.length} 个仓库的内容迁入目标仓，然后删除这 ${plan.deletable.length} 个仓：
+
+` +
+            plan.deletable.join('\n') + '\n\n' +
+            `迁移量约 ${MB(plan.moveBytes)} MB。删除仓库不可恢复，确定继续？`);
+        if (!okDel) return;
+
+        if (box) box.innerHTML = '<div style="font-size:13px;color:#6b7280;">⏳ 正在迁移，请勿关闭页面…</div>';
+        try {
+            const res = await this.fileManager.compactRepos(plan, (stage, done, total, msg) => {
+                if (box) box.innerHTML =
+                    `<div style="font-size:13px;color:#6b7280;">⏳ 迁移中 ${done}/${total}…<br>
+                     <span style="font-size:12px;color:#9ca3af;">${msg}</span></div>`;
+            }, true);
+
+            // 本地仓库列表里也要移除已删的
+            const gone = new Set(res.deleted || []);
+            if (gone.size) {
+                this.storage.setRepos(this.storage.getRepos().filter(r => !gone.has(`${r.owner}/${r.repo}`)));
+            }
+            try { await this.configSync?.pushConfig?.(); } catch (e) { /* 已改本地，稍后会自动同步 */ }
+
+            if (box) box.innerHTML =
+                `<div style="font-size:13px;line-height:1.8;">
+                   <div style="padding:14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;color:#166534;">
+                     ✓ 迁移 ${res.moved} 个分片，删除 ${res.deleted.length} 个空仓。
+                   </div>
+                   <div style="margin-top:12px;">
+                     <button class="btn-secondary btn-sm" onclick="app.showStorageManager()">返回</button>
+                   </div>
+                 </div>`;
+            this.ui?.showToast(`整理完成：${plan.beforeCount} 个仓 → ${plan.afterCount} 个`, 'success');
+        } catch (e) {
+            if (box) box.innerHTML =
+                `<div style="font-size:13px;line-height:1.8;">
+                   <div style="padding:14px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#991b1b;">
+                     ✗ ${e.message}
+                   </div>
+                   <div style="margin-top:12px;">
+                     <button class="btn-secondary btn-sm" onclick="app.showStorageManager()">返回</button>
+                   </div>
+                 </div>`;
+        }
+    }
+
+    /** 手动新建一个存储仓库 */
+    async createStorageRepoNow() {
+        try {
+            const repo = await this.fileManager.autoCreateStorageRepo();
+            this.ui?.showToast(`已创建存储仓库 ${repo.repo}`, 'success');
+            await this.showStorageManager();
+        } catch (e) {
+            this.ui?.showToast('创建失败: ' + e.message, 'error');
+        }
+    }
+
+    /** 设置默认写入仓库 */
+    setDefaultStorageRepo(owner, repo) {
+        const repos = this.storage.getRepos();
+        repos.forEach(r => { r.isDefault = (r.owner === owner && r.repo === repo); });
+        this.storage.setRepos(repos);
+        this.ui?.showToast(`已把 ${repo} 设为默认写入仓库`, 'success');
+        this.showStorageManager();
+    }
+
+    openRepoOnGithub(owner, repo) {
+        window.open(`https://github.com/${owner}/${repo}`, '_blank');
+    }
+
+    /**
+     * 用仓库真实内容量校准登记的用量。
+     *
+     * ★ 必须用 tree 逐 blob 求和（maintain.scan 的做法），不能用 GitHub 的
+     *   repo.size —— 后者含 git 历史，实测某仓当前内容 806MB、repo.size 996MB。
+     *   拿 996MB 去校准，等于把历史当成已用容量，仓库会一直被判定为满。
+     */
+    async quickRecalibrate() {
+        const box = document.getElementById('storage-mgr-body');
+        try {
+            if (box) box.innerHTML = '<div style="font-size:13px;color:#6b7280;">正在扫描仓库文件树…</div>';
+            if (!this.maintain) this.maintain = new Maintain(this.api, this.storage);
+            const rep = await this.maintain.scan();
+            const r = await this.maintain.recalibrateUsage(rep);
+            this.ui?.showToast(`已校准，找回 ${(r.freedBytes / 1048576).toFixed(1)} MB 虚假占用`, 'success');
+            await this.showStorageManager();
+        } catch (e) {
+            if (box) box.innerHTML = '<div style="font-size:13px;color:#dc2626;">校准失败：' + e.message + '</div>';
         }
     }
 
@@ -1464,6 +2232,13 @@ GitHub 建议不超过 1 GB`;
     }
 
     async showPluginMarket() {
+        // ★ 移动端不加载插件：拿不到后端（下载不了插件代码），点了只会白屏
+        try {
+            if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+                this.ui.showToast?.('插件在移动端不可用（无法下载插件后端）', 'info');
+                return;
+            }
+        } catch (e) {}
         const cached = this.getCache('gd_cache_plugins');
         const installed = this.getInstalledPlugins();
         if (cached) {

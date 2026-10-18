@@ -68,6 +68,18 @@ class Handler(SimpleHTTPRequestHandler):
                 with open(path, 'rb') as f:
                     raw = f.read()
                 tag = SHIM_TAG.encode('utf-8')
+                # ★ 桌面版一律用未压缩的源码。
+                #   网页版加载 js/xxx.min.js 是为了省流量；桌面版是本地文件，
+                #   省不到，却要承担「min.js 由网页版构建生成、同步只搬运」
+                #   带来的滞后 —— 源码改了而 min.js 没重压，跑的还是旧代码。
+                #
+                #   shim 只能拦住 document.write 动态插入的那批；
+                #   index.html 里还有一处**写死**的 branch-guard.min.js，
+                #   它是静态 <script> 标签，document.write 劫持管不到 ——
+                #   所以在服务端这一层统一改写，两处都覆盖。
+                import re as _re2
+                raw = _re2.sub(rb'(js/[A-Za-z0-9_-]+)\.min\.js', rb'\1.js', raw)
+                raw = _re2.sub(rb'(css/[A-Za-z0-9_-]+)\.min\.css', rb'\1.css', raw)
                 body = _inject_head(raw, tag)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')

@@ -31,6 +31,10 @@
     --radius-lg: 12px;
     --sidebar-width: 260px;
     --toolbar-height: 56px;
+    /* 外框：给侧边栏和主窗口留出圆角所需的边距 */
+    --frame-pad: 10px;
+    --frame-bg: #eef1f6;
+    --panel-radius: 14px;
 }
 
 body {
@@ -273,6 +277,10 @@ body {
     display: flex;
     height: 100vh;
     overflow: hidden;
+    /* ★ 外框留白：侧边栏和主窗口各自带圆角，中间留出缝隙才看得出是两块面板 */
+    padding: var(--frame-pad);
+    gap: var(--frame-pad);
+    background: var(--frame-bg);
 }
 
 /* ===== 侧边栏 ===== */
@@ -284,6 +292,8 @@ body {
     flex-direction: column;
     flex-shrink: 0;
     position: relative;
+    border-radius: var(--panel-radius);
+    overflow: hidden;
 }
 
 .sidebar-header {
@@ -353,7 +363,26 @@ body {
     font-size: 16px;
     width: 20px;
     text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
+
+/* 侧边栏图标：图片版。
+   ★ 为什么不用 background-image 而用 <img>：
+     <img> 能被浏览器按 width/height 缩放并保留 alt 语义，
+     而且 collapsed 态（侧边栏收窄）时不用额外改 CSS。 */
+.nav-icon img {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    display: block;
+    /* 图标本身是紫蓝渐变描边，在深色主题下不至于消失 */
+    opacity: .92;
+}
+
+/* 深色主题：图标提亮，否则描边在深底上发灰 */
+body.dark-theme .nav-icon img { opacity: 1; }
 
 .repo-list {
     margin-top: 4px;
@@ -432,7 +461,10 @@ body {
 
 /* 侧边栏拖拽调整宽度 */
 .sidebar-resizer {
-    width: 4px;
+    /* 外框加了 gap，这里用负边距把缝隙占满 —— 否则只有 4px 能拖，很难抓到 */
+    margin-left: calc(-1 * var(--frame-pad));
+    margin-right: calc(-1 * var(--frame-pad));
+    width: calc(2 * var(--frame-pad));
     cursor: col-resize;
     background: transparent;
     flex-shrink: 0;
@@ -457,6 +489,7 @@ body.resizing {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    border-radius: var(--panel-radius);
 }
 
 /* ===== 工具栏 ===== */
@@ -1270,6 +1303,9 @@ body.resizing {
 }
 .sidebar.collapsed .nav-icon {
     margin: 0;
+    /* ★ 收窄到 60px 后图标挤在一起是歪的（图标和文字的基线对不齐），
+         与其调半天对齐，不如收起时干脆不显示 —— 用户要的就是这个 */
+    display: none;
 }
 .sidebar.collapsed .user-info {
     justify-content: center;
@@ -1279,7 +1315,9 @@ body.resizing {
     margin: 0;
 }
 .main-content.sidebar-collapsed {
-    margin-left: 60px;
+    /* ★ 侧边栏在文档流里，收窄后本来就只占 60px；
+         再给 main 加 60px 边距会凭空多出一条空档 */
+    margin-left: 0;
 }
 
 /* 侧边栏遮罩 */
@@ -2045,6 +2083,10 @@ body.dark-mode .main-content {
     background: var(--bg-primary);
 }
 
+body.dark-mode .app {
+    background: #0d1117;
+}
+
 body.dark-mode .toolbar {
     background: var(--bg-secondary);
     border-bottom-color: var(--border-color);
@@ -2142,6 +2184,19 @@ body.dark-mode .modal-close {
     .mobile-bottom-nav {
         display: block;
     }
+    /* 移动端侧边栏是浮层：不需要外框留白，圆角也去掉（贴满屏幕更自然） */
+    .app {
+        padding: 0;
+        gap: 0;
+        background: transparent;
+    }
+    .sidebar,
+    .main-content {
+        border-radius: 0;
+    }
+    .sidebar-resizer {
+        display: none;
+    }
     .sidebar {
         transform: translateX(-100%);
         transition: transform 0.3s ease;
@@ -2151,7 +2206,8 @@ body.dark-mode .modal-close {
     }
     .main-content {
         margin-left: 0 !important;
-        padding-bottom: 70px;
+        /* 底部 tab 已移除，不再需要给它让出 70px */
+        padding-bottom: 16px;
     }
     .file-grid {
         grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)) !important;
@@ -2541,3 +2597,1362 @@ body.dark-mode .mobile-nav-item.active {
 @media (prefers-reduced-motion: reduce) {
     .plugin-overlay { animation: none; }
 }
+
+/* ==================== 任务坞 ====================
+   容器是全屏覆盖层但不吃点击，只有窗口本身可交互。
+   不这样写的话，坞会挡住整个网盘界面。
+   ================================================ */
+#task-dock {
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    pointer-events: none;
+}
+#task-dock > * { pointer-events: auto; }
+body.td-dragging-body { user-select: none; cursor: grabbing; }
+
+/* ── 小窗口 ── */
+.td-mini {
+    position: absolute;
+    width: 260px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(17, 24, 39, .12);
+    cursor: pointer;
+    transition: transform .15s, box-shadow .15s;
+    animation: td-in .18s ease-out;
+}
+.td-mini:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(17, 24, 39, .16); }
+.td-mini.td-dragging { cursor: grabbing; box-shadow: 0 16px 40px rgba(17, 24, 39, .24); }
+.td-mini-ico { font-size: 18px; flex: 0 0 auto; }
+.td-mini-main { flex: 1 1 auto; min-width: 0; }
+.td-mini-title {
+    font-size: 13px; font-weight: 600; color: #111827;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.td-mini-bar {
+    height: 4px; background: #eef2f7; border-radius: 999px;
+    overflow: hidden; margin: 5px 0 4px;
+}
+.td-mini-fill {
+    height: 100%; background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    border-radius: 999px; transition: width .25s;
+}
+.td-mini.is-error .td-mini-fill { background: #ef4444; }
+.td-mini.is-done  .td-mini-fill { background: #10b981; }
+.td-mini-sub {
+    font-size: 11px; color: #6b7280;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.td-mini-pct { font-size: 12px; font-weight: 700; color: #4f46e5; flex: 0 0 auto; }
+.td-mini.is-error .td-mini-pct { color: #ef4444; }
+.td-mini.is-done  .td-mini-pct { color: #10b981; }
+
+/* ── 展开的大窗口 ── */
+.td-panel {
+    position: absolute;
+    width: 340px;
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    box-shadow: 0 18px 48px rgba(17, 24, 39, .18);
+    overflow: hidden;
+    animation: td-in .18s ease-out;
+}
+.td-panel.td-dragging { box-shadow: 0 24px 60px rgba(17, 24, 39, .28); }
+.td-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff;
+    cursor: grab;
+    flex: 0 0 auto;
+}
+.td-head:active { cursor: grabbing; }
+.td-head-ico { font-size: 15px; }
+.td-head-title {
+    flex: 1 1 auto; font-size: 13px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.td-head-pct { font-size: 12px; font-weight: 700; opacity: .95; }
+.td-btn {
+    flex: 0 0 auto; width: 22px; height: 22px;
+    border: none; border-radius: 6px;
+    background: rgba(255, 255, 255, .18);
+    color: #fff; font-size: 12px; line-height: 1;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.td-btn:hover { background: rgba(255, 255, 255, .32); }
+.td-body {
+    flex: 1 1 auto; overflow-y: auto;
+    padding: 10px 12px; min-height: 0;
+}
+.td-row { padding: 6px 0; border-bottom: 1px solid #f3f4f6; }
+.td-row:last-child { border-bottom: none; }
+.td-row-name {
+    font-size: 12px; color: #374151; display: block;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.td-row-pct { float: right; font-size: 11px; color: #6b7280; margin-top: -16px; }
+.td-row.done .td-row-pct { color: #10b981; }
+.td-row-bar {
+    height: 3px; background: #eef2f7; border-radius: 999px;
+    overflow: hidden; margin-top: 5px;
+}
+.td-row-bar > div {
+    height: 100%; background: #6366f1; border-radius: 999px; transition: width .2s;
+}
+.td-row.done .td-row-bar > div { background: #10b981; }
+.td-note { font-size: 12px; color: #6b7280; padding: 4px 0; }
+.td-bar {
+    height: 6px; background: #eef2f7; border-radius: 999px;
+    overflow: hidden; margin-top: 8px;
+}
+.td-bar-fill {
+    height: 100%; background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    border-radius: 999px; transition: width .25s;
+}
+.td-panel.is-done .td-bar-fill { background: #10b981; }
+.td-panel.is-error .td-bar-fill { background: #ef4444; }
+.td-err {
+    padding: 8px 12px; font-size: 12px; color: #b91c1c;
+    background: #fef2f2; border-top: 1px solid #fecaca;
+    word-break: break-all;
+}
+.td-foot {
+    flex: 0 0 auto; padding: 6px 12px;
+    font-size: 11px; color: #9ca3af; background: #f9fafb;
+    border-top: 1px solid #f3f4f6;
+}
+
+/* ── 全部任务列表 ── */
+.td-list-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 6px; border-radius: 8px; cursor: pointer;
+    border-bottom: 1px solid #f3f4f6;
+}
+.td-list-row:hover { background: #f3f4f6; }
+.td-list-row:last-child { border-bottom: none; }
+.td-list-ico { font-size: 14px; }
+.td-list-title {
+    flex: 1 1 auto; font-size: 12px; color: #374151;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.td-list-st { font-size: 11px; color: #6b7280; flex: 0 0 auto; }
+.td-list-row.error .td-list-st { color: #ef4444; }
+.td-list-row.done  .td-list-st { color: #10b981; }
+
+/* ── 停靠提示 ── */
+.td-dock-hint {
+    position: fixed; top: 50%; z-index: 9500;
+    padding: 8px 14px; border-radius: 10px;
+    background: rgba(79, 70, 229, .92); color: #fff;
+    font-size: 12px; font-weight: 600;
+    opacity: 0; transition: opacity .15s;
+    pointer-events: none;
+}
+.td-dock-hint.show { opacity: 1; }
+
+@keyframes td-in {
+    from { opacity: 0; transform: translateY(8px) scale(.98); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* 深色模式 */
+body.dark .td-mini,
+body.dark .td-panel {
+    background: #1f2937; border-color: #374151;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+}
+body.dark .td-mini-title,
+body.dark .td-row-name,
+body.dark .td-list-title { color: #e5e7eb; }
+body.dark .td-mini-bar,
+body.dark .td-row-bar,
+body.dark .td-bar { background: #374151; }
+body.dark .td-mini-sub,
+body.dark .td-list-st,
+body.dark .td-note { color: #9ca3af; }
+body.dark .td-row { border-color: #374151; }
+body.dark .td-list-row { border-color: #374151; }
+body.dark .td-list-row:hover { background: #374151; }
+body.dark .td-foot { background: #111827; border-color: #374151; }
+
+/* 窄屏：小窗收窄，别把屏幕占满 */
+@media (max-width: 520px) {
+    .td-mini { width: calc(100vw - 24px); }
+    .td-panel { width: calc(100vw - 24px); max-height: 50vh; }
+}
+
+/* ==================== 插件窗口（任务坞同款） ====================
+   插件窗口是常驻 DOM 节点，收起/展开只切 class，绝不重建或移动：
+   移动 <iframe> 会触发重新加载，插件内部状态会丢。
+   ================================================================ */
+#plugin-dock {
+    position: fixed;
+    inset: 0;
+    z-index: 9500;
+    pointer-events: none;
+}
+#plugin-dock > * { pointer-events: auto; }
+
+.tp-win {
+    position: absolute;
+    width: 460px;
+    height: 380px;
+    min-width: 240px;
+    min-height: 160px;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    box-shadow: 0 18px 50px rgba(17, 24, 39, .22);
+    overflow: hidden;
+    resize: both;
+    animation: tp-in .18s ease-out;
+}
+@keyframes tp-in { from { opacity: 0; transform: translateY(8px); } }
+
+.tp-win.is-full {
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+    resize: none;
+}
+
+.tp-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff;
+    cursor: grab;
+    user-select: none;
+    flex-shrink: 0;
+}
+.tp-win.tp-dragging .tp-head { cursor: grabbing; }
+.tp-ico { font-size: 15px; line-height: 1; }
+.tp-title {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+}
+.tp-spacer { flex: 1; }
+.tp-btn {
+    border: none;
+    background: rgba(255, 255, 255, .18);
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.tp-btn:hover { background: rgba(255, 255, 255, .32); }
+
+.tp-body { flex: 1; min-height: 0; display: flex; background: #fff; }
+.tp-body > iframe { flex: 1; width: 100%; height: 100%; border: none; display: block; }
+
+/* ── 收起成小窗：只隐藏内容区，节点不动 ── */
+.tp-win.is-mini {
+    width: 230px;
+    height: 62px;
+    /* 展开态的 min-width:240 会把小窗顶宽，这里必须归零，
+       否则小窗和合并卡宽度不一致，堆叠时看着参差 */
+    min-width: 0;
+    min-height: 0;
+    resize: none;
+    border-radius: 10px;
+}
+.tp-win.is-mini .tp-body { display: none; }
+.tp-win.is-mini .tp-head { height: 100%; border-radius: 10px 10px 0 0; cursor: pointer; }
+
+/* ── 收进「后台进程」的插件：贴在预览卡上（移动端） ── */
+.tp-win.is-stage {
+    min-width: 0;
+    min-height: 0;
+    resize: none;
+    border-radius: 10px;
+    box-shadow: 0 6px 18px rgba(17, 24, 39, .14);
+}
+.tp-win.is-stage .tp-head { cursor: pointer; }
+
+/* 预览态的透明点击层：点在它上面 = 全屏打开插件 */
+.tp-body { position: relative; }
+.tp-stage-mask { position: absolute; inset: 0; z-index: 5; display: none; cursor: pointer; }
+.tp-win.is-stage .tp-stage-mask { display: block; }
+
+/* ── 「后台进程」里的插件预览卡 ──
+   占位框只是给插件窗口一个落脚点，窗口本身盖在上面（#plugin-dock 是 fixed 层），
+   所以这里画成虚线空框，窗口没贴上来时也不显得像块脏东西。 */
+.tp-stage-sec { margin: 0 0 14px; }
+.tp-stage-title { font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 8px; }
+.tp-stage-card {
+    border: 1px solid #e5e7eb; border-radius: 12px; padding: 8px;
+    background: #fff; margin-bottom: 10px; cursor: pointer;
+}
+.tp-stage-card:active { background: #f9fafb; }
+.tp-stage-head {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 6px;
+}
+.tp-stage-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-stage {
+    position: relative; height: 210px; border-radius: 8px;
+    background: #f9fafb; border: 1px dashed #d1d5db;
+}
+.tp-stage::after {
+    content: '插件预览';
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: #9ca3af;
+}
+.tp-stage-tip { font-size: 11px; color: #9ca3af; margin-top: 6px; text-align: center; }
+
+/* ── 合并卡 ── */
+.tp-merged {
+    position: absolute;
+    display: none;
+    align-items: center;
+    gap: 10px;
+    width: 230px;
+    padding: 10px 12px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(17, 24, 39, .16);
+    cursor: pointer;
+}
+.tp-merged.show { display: flex; }
+.tp-merged:hover { transform: translateY(-2px); }
+.tp-merged-ico { font-size: 20px; }
+.tp-merged-title { font-size: 13px; font-weight: 600; color: #1f2937; }
+
+/* ── 全部插件列表面板 ── */
+.tp-list {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    width: 300px;
+    max-height: 60vh;
+    display: none;
+    flex-direction: column;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    box-shadow: 0 18px 50px rgba(17, 24, 39, .22);
+    overflow: hidden;
+}
+.tp-list.show { display: flex; }
+.tp-list-body { overflow-y: auto; }
+.tp-list-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #f3f4f6;
+    cursor: pointer;
+}
+.tp-list-row:hover { background: #f8f7ff; }
+.tp-list-ico { font-size: 16px; }
+.tp-list-name {
+    flex: 1;
+    font-size: 13px;
+    color: #1f2937;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tp-list-st { font-size: 11px; color: #6b7280; }
+
+body.dark .tp-win,
+body.dark .tp-merged,
+body.dark .tp-list { background: #1f2937; border-color: #374151; }
+body.dark .tp-list-name { color: #e5e7eb; }
+body.dark .tp-list-row { border-color: #374151; }
+body.dark .tp-list-row:hover { background: #374151; }
+
+@media (max-width: 520px) {
+    .tp-win { width: calc(100vw - 24px); }
+    .tp-win.is-mini { width: calc(100vw - 24px); }
+    .tp-list { width: calc(100vw - 24px); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .tp-win { animation: none; }
+}
+
+
+/* ==================== 侧边栏分组折叠 ==================== */
+/* 把「我的分享 / 发现分享」收进一个折叠里，减少侧边栏纵向占用。 */
+.nav-group-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary, #4b5563);
+    user-select: none;
+    transition: background 0.15s;
+}
+.nav-group-header:hover { background: var(--bg-hover, #f3f4f6); }
+.nav-group-icon { font-size: 15px; width: 20px; text-align: center; }
+.nav-group-title { flex: 1; font-weight: 500; }
+.nav-group-badge {
+    font-size: 11px;
+    background: #eef2ff;
+    color: #4338ca;
+    border-radius: 999px;
+    padding: 1px 7px;
+}
+.nav-group-arrow {
+    font-size: 11px;
+    color: #9ca3af;
+    transition: transform 0.2s ease;
+}
+.nav-group-header.open .nav-group-arrow { transform: rotate(-90deg); }
+
+/* 折叠体：用 grid-template-rows 做高度动画，比 max-height 更平滑且不用写死高度 */
+.nav-group-body {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.22s ease;
+    overflow: hidden;
+}
+.nav-group-body > * { min-height: 0; }
+.nav-group-body.open { grid-template-rows: 1fr; }
+.nav-group-body .nav-item { padding-left: 42px; }
+
+/* 侧边栏角标 */
+.nav-badge {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 600;
+    background: #2563eb;
+    color: #fff;
+    border-radius: 999px;
+    padding: 1px 7px;
+    min-width: 18px;
+    text-align: center;
+}
+body.dark-mode .nav-badge { background: #3b82f6; }
+
+/* ==================== 后台进程面板 ==================== */
+.task-mgr-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border-light, #e5e7eb);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+.task-mgr-row:hover { background: var(--bg-hover, #f9fafb); border-color: #d1d5db; }
+.task-mgr-row.is-error { border-color: #fecaca; background: #fef2f2; }
+.task-mgr-row.is-done  { border-color: #bbf7d0; }
+.task-mgr-ico { font-size: 18px; line-height: 1.4; }
+.task-mgr-main { flex: 1; min-width: 0; }
+.task-mgr-title {
+    font-size: 13px; font-weight: 600; color: var(--text-primary, #1f2937);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.task-mgr-sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
+.task-mgr-bar {
+    height: 4px; background: #e5e7eb; border-radius: 999px; margin-top: 7px; overflow: hidden;
+}
+.task-mgr-fill { height: 100%; background: #2563eb; border-radius: 999px; transition: width 0.3s ease; }
+.task-mgr-row.is-error .task-mgr-fill { background: #dc2626; }
+.task-mgr-row.is-done  .task-mgr-fill { background: #16a34a; }
+.task-mgr-right { text-align: right; font-size: 12px; color: #6b7280; white-space: nowrap; }
+.task-mgr-items { margin-top: 8px; font-size: 12px; color: #6b7280; line-height: 1.7; }
+.task-mgr-items .ok { color: #16a34a; }
+.task-mgr-items .bad { color: #dc2626; }
+
+/* ── 飞入动画：小窗从屏幕边缘飞到进程列表里 ──
+   用 transform 合成层做，不改 left/top，避免逐帧重排。 */
+.td-mini.is-flying {
+    transition: transform 0.42s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.42s ease;
+    pointer-events: none;
+    z-index: 9999;
+}
+/* 列表里接收飞入的那个位置，先留个"落点" */
+.task-mgr-row.is-landing {
+    animation: tm-land 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes tm-land {
+    0%   { transform: scale(0.92); opacity: 0.35; box-shadow: 0 0 0 3px rgba(37,99,235,0.35); }
+    60%  { transform: scale(1.01); opacity: 1; }
+    100% { transform: scale(1); box-shadow: none; }
+}
+
+/* ==================== 移动端：只留一套导航（左侧抽屉） ==================== */
+@media (max-width: 768px) {
+    /* ★ 用户选了「留左侧抽屉、去掉底部」。
+       底部 tab 整个移除 —— 两个常驻入口干同一件事没必要，
+       而抽屉能放下更多条目（后台进程、设置、账号等），比 5 个 tab 宽裕。 */
+    .mobile-bottom-nav {
+        display: none !important;
+    }
+    /* 汉堡按钮恢复：它是抽屉的唯一入口 */
+    #menu-toggle { display: flex !important; }
+    .sidebar-resizer { display: none !important; }
+
+    /* 「更多」面板：从底部滑出 */
+    .sidebar.as-sheet {
+        position: fixed;
+        left: 0; right: 0; bottom: 0; top: auto;
+        width: 100%;
+        max-height: 78vh;
+        transform: translateY(100%);
+        transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+        z-index: 1001;
+        border-radius: 16px 16px 0 0;
+        box-shadow: 0 -8px 28px rgba(0,0,0,0.18);
+        display: flex !important;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    .sidebar.as-sheet.open { transform: translateY(0); }
+    .sidebar.as-sheet .sidebar-nav { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    /* 顶部加个抓手条 */
+    .sidebar.as-sheet::before {
+        content: '';
+        display: block;
+        width: 38px; height: 4px;
+        border-radius: 999px;
+        background: #d1d5db;
+        margin: 8px auto 2px;
+        flex: none;
+    }
+    /* ★ 移动端不加载插件：拿不到后端，点了也是白屏 */
+    #plugins-nav, .mobile-nav-item [data-view="plugins"] { display: none !important; }
+
+    /* 底部 tab 角标 */
+    .mobile-nav-item { position: relative; }
+    .mobile-nav-badge {
+        position: absolute; top: 2px; right: 50%;
+        margin-right: -18px;
+        min-width: 15px; height: 15px;
+        border-radius: 999px;
+        background: #2563eb; color: #fff;
+        font-size: 10px; font-weight: 700;
+        display: flex; align-items: center; justify-content: center;
+        padding: 0 4px;
+    }
+}
+
+/* 遮罩（更多面板用） */
+.sheet-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.35);
+    z-index: 1000;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.25s;
+}
+.sheet-overlay.active { opacity: 1; pointer-events: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+    .td-mini.is-flying, .task-mgr-row.is-landing, .sidebar.as-sheet { transition: none !important; animation: none !important; }
+}
+
+
+/* ==================== 登录页隐藏底部导航 ====================
+   未登录时底部 tab（文件/最近/收藏/后台/更多）没有任何可去的地方 ——
+   点哪个都是空界面，还占着 56px 高度挡登录卡片。
+   body 默认带 gd-logged-out（首屏就不闪），登录成功后由 showApp() 移除。 */
+body.gd-logged-out .mobile-bottom-nav {
+    display: none !important;
+}
+/* 纯 CSS 兜底：只要登录页是可见的就隐藏，不依赖 JS 有没有跑到。
+   （:has 在 Chrome 105+ / Safari 15.4+ 都支持；不支持的老浏览器靠上面那条 body class。） */
+body:has(#login-screen:not(.hidden)) .mobile-bottom-nav {
+    display: none !important;
+}
+
+/* ==================== 文件夹导航 / 高级筛选 ==================== */
+.folder-tree {
+    max-height: 54vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.ft-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #374151;
+}
+.ft-row:hover { background: #f3f4f6; }
+.ft-row.is-cur { background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+.ft-ico { flex: none; }
+.ft-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ft-count { flex: none; font-size: 11px; color: #9ca3af; }
+
+.adv-field { margin-bottom: 14px; }
+.adv-field > label {
+    display: block; font-size: 12px; color: #6b7280; margin-bottom: 6px; font-weight: 600;
+}
+.adv-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; }
+.adv-chip {
+    padding: 4px 10px; border-radius: 999px; font-size: 12px;
+    background: #f3f4f6; color: #4b5563; cursor: pointer; user-select: none;
+}
+.adv-chip.is-on { background: #2563eb; color: #fff; font-weight: 600; }
+.adv-field select, .adv-field input[type=text] {
+    width: 100%; padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 8px;
+    font-size: 13px; box-sizing: border-box;
+}
+.adv-count { font-size: 12px; color: #6b7280; margin-bottom: 12px; }
+.adv-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ==================== 后台进程（主窗口视图） ==================== */
+.tasks-view {
+    padding: 20px;
+    max-width: 860px;
+    margin: 0 auto;
+}
+/* 后台进程/任务视图的宿主：必须改回块级。
+   .file-list 是 grid，直接把 .tasks-view 塞进去会被当成 grid item
+   压进第一列，居中失效、内容贴左上。 */
+.file-list.gd-tasks-host {
+    display: block;
+    width: 100%;
+}
+.file-list.gd-tasks-host .tasks-view {
+    width: 100%;
+}
+/* 空状态才垂直居中（有任务时让列表从顶部开始排） */
+.gd-tasks-empty {
+    width: 100%;
+    min-height: 56vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 26px 10px;
+    text-align: center;
+}
+.gd-tasks-empty .tv-ico { font-size: 40px; line-height: 1; margin-bottom: 12px; }
+.gd-tasks-empty .tv-t { font-size: 14px; font-weight: 600; color: var(--text-color, #111827); }
+.gd-tasks-empty .tv-s { font-size: 12px; color: var(--text-muted, #6b7280); margin-top: 6px; }
+.tasks-view-title {
+    font-size: 16px; font-weight: 700; color: #111827;
+    margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
+}
+.tasks-view-sub { font-size: 12px; color: #6b7280; margin-bottom: 16px; }
+.tasks-view-empty {
+    text-align: center; padding: 48px 16px; color: #9ca3af; font-size: 13px;
+}
+.tasks-view-empty .tv-ico { font-size: 34px; display: block; margin-bottom: 10px; }
+
+/* ==================== CSS 版本戳 ====================
+   JS 读这条规则的 --stamp 判断浏览器实际加载的 CSS 是不是最新的。
+   GitHub Pages 的 CDN 会长时间缓存 css，以前版本号写死在 ?v=58 忘了改，
+   结果连改 6 个版本用户看到的都是旧界面 —— 改了等于没改。
+   现在 stamp 跟着 internalVersion 走，对不上就提示硬刷新。 */
+#gd-css-stamp { --stamp: "79"; --api-stamp: "7"; }
+
+/* ==================================================================
+   动画打磨
+   ------------------------------------------------------------------
+   目标：把"瞬间出现 / 瞬间消失"改成有层级的运动。
+   三条原则：
+   1) 进入用 ease-out（先快后慢，收得稳），退出用 ease-in（先慢后快，走得干脆）
+   2) 只动 transform / opacity，不动 width/height/top/left —— 前者走合成层不重排
+   3) 全部在 prefers-reduced-motion 下关闭（文件末尾统一处理）
+   ================================================================== */
+
+:root {
+    --ease-out: cubic-bezier(.22, 1, .36, 1);
+    --ease-in:  cubic-bezier(.4, 0, 1, 1);
+    --dur-xs: .12s;
+    --dur-sm: .18s;
+    --dur-md: .26s;
+    --dur-lg: .34s;
+}
+
+/* ---------- 1. 弹窗：遮罩淡入 + 面板上浮 ---------- */
+.modal-overlay {
+    animation: gd-mo-in var(--dur-sm) ease-out;
+}
+@keyframes gd-mo-in {
+    from { opacity: 0; }
+}
+.modal {
+    animation: gd-md-in var(--dur-lg) var(--ease-out);
+}
+@keyframes gd-md-in {
+    from { opacity: 0; transform: translateY(16px) scale(.965); }
+}
+
+/* 退场：旧弹窗被挪到独立层播放，不占用 #modal-container
+   —— 否则「closeModal(); 立刻 showModal()」会被延迟清空误伤 */
+#modal-exit-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 1900;          /* 低于新弹窗(2000)，新弹窗不会被旧影子盖住 */
+    pointer-events: none;   /* 退场中的弹窗不可点 */
+}
+.modal-overlay.is-closing {
+    animation: gd-mo-out var(--dur-sm) var(--ease-in) forwards;
+}
+.modal-overlay.is-closing .modal {
+    animation: gd-md-out var(--dur-sm) var(--ease-in) forwards;
+}
+@keyframes gd-mo-out { to { opacity: 0; } }
+@keyframes gd-md-out { to { opacity: 0; transform: translateY(8px) scale(.985); } }
+
+/* ---------- 2. 文件列表：错峰入场 ----------
+   切换目录 / 搜索后整块替换，原来是"啪"地一下全出来。
+   现在每个格子晚 24ms 出场，形成从左上到右下的推进感。
+   第 15 个之后统一用 336ms，避免文件多时尾巴拖太久。 */
+.file-item {
+    animation: gd-fi-in .26s var(--ease-out) backwards;
+    animation-delay: calc(var(--fi, 14) * 20ms);
+}
+.file-item:nth-child(1)  { --fi: 0;  }
+.file-item:nth-child(2)  { --fi: 1;  }
+.file-item:nth-child(3)  { --fi: 2;  }
+.file-item:nth-child(4)  { --fi: 3;  }
+.file-item:nth-child(5)  { --fi: 4;  }
+.file-item:nth-child(6)  { --fi: 5;  }
+.file-item:nth-child(7)  { --fi: 6;  }
+.file-item:nth-child(8)  { --fi: 7;  }
+.file-item:nth-child(9)  { --fi: 8;  }
+.file-item:nth-child(10) { --fi: 9;  }
+.file-item:nth-child(11) { --fi: 10; }
+.file-item:nth-child(12) { --fi: 11; }
+.file-item:nth-child(13) { --fi: 12; }
+.file-item:nth-child(14) { --fi: 13; }
+@keyframes gd-fi-in {
+    from { opacity: 0; transform: translateY(10px) scale(.98); }
+}
+
+/* ---------- 3. 悬停 / 按下 ---------- */
+.file-item .file-icon {
+    transition: transform var(--dur-md) var(--ease-out);
+}
+.file-item:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(31, 35, 40, .10);
+}
+.file-item:hover .file-icon {
+    transform: scale(1.08);
+}
+.file-item.selected:hover {
+    transform: translateY(-2px);
+}
+/* 按下时轻微下沉，给"按到了"的确认感 */
+.btn-primary:active,
+.btn-secondary:active,
+.btn-text:active,
+.btn-icon:active,
+.modal-close:active {
+    transform: scale(.955);
+    transition: transform var(--dur-xs) ease-out;
+}
+
+/* ---------- 4. 右键菜单：从点击处弹出 ---------- */
+.ctx-menu {
+    transform: scale(.93) translateY(-4px);
+    transition: opacity .13s ease-out, transform .18s var(--ease-out);
+}
+.ctx-menu.on {
+    transform: scale(1) translateY(0);
+}
+
+/* ---------- 5. Toast：入场带轻微回弹，退场干净 ---------- */
+.toast {
+    animation: gd-toast-in .38s var(--ease-out);
+}
+@keyframes gd-toast-in {
+    from { opacity: 0; transform: translateX(110%) scale(.94); }
+}
+.toast.is-out {
+    opacity: 0;
+    transform: translateX(110%) scale(.96);
+    transition: opacity .2s var(--ease-in), transform .22s var(--ease-in);
+}
+
+/* ---------- 6. 移动端抽屉 ----------
+   ★ 原来遮罩是 display:none → block + opacity 0→1 同帧切换，
+     浏览器不会为 display 变化播放过渡，所以遮罩是"硬闪"出来的。
+     改用 visibility（可过渡）+ pointer-events，淡入淡出才真的生效。 */
+.sidebar-overlay {
+    display: block;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity var(--dur-md) ease, visibility 0s linear var(--dur-md);
+}
+.sidebar-overlay.active {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity var(--dur-md) ease, visibility 0s;
+}
+@media (max-width: 768px) {
+    .sidebar {
+        transition: transform .3s var(--ease-out);
+    }
+}
+
+/* ---------- 7. 加载指示：双环反向 ---------- */
+.spinner {
+    position: relative;
+}
+.spinner::after {
+    content: '';
+    position: absolute;
+    inset: -7px;
+    border: 2px solid transparent;
+    border-bottom-color: var(--accent-color);
+    border-radius: 50%;
+    opacity: .35;
+    animation: spin 1.4s linear infinite reverse;
+}
+
+/* ---------- 8. 进度条：流动光泽 ---------- */
+.progress-bar-fill {
+    position: relative;
+    overflow: hidden;
+}
+.progress-bar-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.5), transparent);
+    transform: translateX(-100%);
+    animation: gd-sheen 1.5s ease-in-out infinite;
+}
+@keyframes gd-sheen {
+    to { transform: translateX(100%); }
+}
+
+/* ---------- 9. 涟漪：点下去有一圈扩散 ----------
+   由 js/anim.js 在 pointerdown 时给宿主加 .gd-ripple-host 并注入 <span>。
+   ★ 为什么 host 的两个属性必须由 CSS 给而不是行内写：
+     同一个按钮可能被点很多次，行内样式会被反复覆盖，
+     而 class 只加一次，且卸载时不用记得还原。 */
+.gd-ripple-host {
+    position: relative;
+    overflow: hidden;
+}
+.gd-ripple {
+    position: absolute;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: .20;
+    transform: scale(0);
+    pointer-events: none;
+    animation: gd-ripple .52s var(--ease-out) forwards;
+}
+@keyframes gd-ripple {
+    to { transform: scale(1); opacity: 0; }
+}
+
+/* ---------- 10. 骨架屏：加载中的占位 ----------
+   原来是转一个圈，用户不知道接下来会长什么样。
+   骨架屏把"大概有几块、每块多大"先画出来，等待感会短很多。 */
+.gd-skel {
+    background: linear-gradient(90deg, #eceef1 25%, #f6f7f9 37%, #eceef1 63%);
+    background-size: 400% 100%;
+    animation: gd-skel 1.4s ease-in-out infinite;
+    border-radius: 6px;
+}
+@keyframes gd-skel {
+    0%   { background-position: 100% 50%; }
+    100% { background-position: 0 50%; }
+}
+
+/* ---------- 11. 空状态：图标轻轻浮着 ----------
+   静止的空状态看着像"卡住了"，轻微浮动表示"这里活着，只是没东西"。 */
+.empty-state .empty-icon {
+    animation: gd-float 3.8s ease-in-out infinite;
+}
+@keyframes gd-float {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-6px); }
+}
+/* 拖放区图标：hover 时弹一下，提示"可以松手了" */
+.upload-drop-zone:hover .upload-drop-icon {
+    animation: gd-nudge .5s var(--ease-out);
+}
+@keyframes gd-nudge {
+    0%   { transform: translateY(0) scale(1); }
+    35%  { transform: translateY(-7px) scale(1.12); }
+    70%  { transform: translateY(2px) scale(.97); }
+    100% { transform: translateY(0) scale(1); }
+}
+
+/* ---------- 12. 滚动时工具栏浮起 ----------
+   ★ transition 放在 .toolbar 上而不是 .is-scrolled 上：
+     加 class 时才有 transition 的话，离场（滚回顶部）会是硬切。 */
+.toolbar {
+    transition: box-shadow var(--dur-md) ease, border-color var(--dur-md) ease;
+}
+.toolbar.is-scrolled {
+    box-shadow: 0 2px 12px rgba(31, 35, 40, .10);
+    border-bottom-color: transparent;
+}
+
+/* ---------- 13. 导航项：按下去有反馈，激活时有个落定 ---------- */
+.nav-item {
+    transition: background .15s, color .15s, transform var(--dur-xs) var(--ease-out);
+}
+.nav-item:active {
+    transform: scale(.975);
+}
+.nav-item.active {
+    animation: gd-nav-on .34s var(--ease-out);
+}
+@keyframes gd-nav-on {
+    from { background: var(--bg-hover); transform: scale(.98); }
+}
+
+/* ---------- 14. 搜索框：聚焦时展开 ---------- */
+.toolbar .search-box input {
+    transition: width .28s var(--ease-out), box-shadow .2s ease, border-color .2s ease;
+}
+.toolbar .search-box input:focus {
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, .16);
+}
+
+/* ---------- 15. 视图切换：整块淡入 ----------
+   切目录/切视图时给容器一次入场，避免"啪"地换脸。
+   ★ 只作用于内容容器，不动 .main-content ——
+     后者带 transform 会成为 fixed 子元素的包含块，任务坞会跟着飘。 */
+.file-area.is-switching {
+    animation: gd-view-in var(--dur-md) var(--ease-out);
+}
+@keyframes gd-view-in {
+    from { opacity: 0; transform: translateY(6px); }
+}
+
+/* ---------- 16. 仪表盘：卡片错峰落位 + 数字滚动 ----------
+   仪表盘是先出 UI 再补数字的，所以卡片入场必须比数字早 ——
+   卡片一张张落位，数字随后从 0 滚上去，才有"正在算给你看"的感觉。 */
+.dash-card, .dash-panel {
+    animation: gd-pop-in .44s var(--ease-out) backwards;
+}
+.dash-card:nth-child(1) { animation-delay: .03s; }
+.dash-card:nth-child(2) { animation-delay: .09s; }
+.dash-card:nth-child(3) { animation-delay: .15s; }
+.dash-card:nth-child(4) { animation-delay: .21s; }
+.dash-panel { animation-delay: .27s; }
+.dash-panel:nth-of-type(2) { animation-delay: .32s; }
+.dash-panel:nth-of-type(3) { animation-delay: .37s; }
+@keyframes gd-pop-in {
+    from { opacity: 0; transform: translateY(14px) scale(.96); }
+}
+.dash-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 10px 24px rgba(31, 35, 40, .18);
+}
+.dash-card {
+    transition: transform var(--dur-md) var(--ease-out), box-shadow var(--dur-md) ease;
+}
+/* 数字滚动时宽度不能抖，否则会左右跳 */
+.dash-num {
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 16.5 抽屉跟手（右滑手势用） ----------
+   js/gesture.js 拖动期间会往 .sidebar 上写 inline transform，
+   所以必须先把 transition 摘掉 —— 否则抽屉会滞后手指一大截，
+   松手瞬间的回弹也会和 CSS 过渡打架，出现"闪一下"。 */
+.sidebar.gd-dragging {
+    transition: none !important;
+}
+/* 手势期间遮罩由 JS 直接写 opacity，同样不能再有过渡 */
+.sidebar-overlay.gd-dragging {
+    transition: none !important;
+}
+
+/* ---------- 16.6 自定义：右键菜单 ---------- */
+.gd-ctx-menu {
+    position: fixed;
+    z-index: 2600;
+    min-width: 190px;
+    padding: 6px;
+    background: var(--bg-primary, #fff);
+    border: 1px solid var(--border-light, #e5e7eb);
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(31, 35, 40, .16);
+    font-size: 13px;
+    animation: gd-ctx-in .14s var(--ease-out);
+}
+@keyframes gd-ctx-in {
+    from { opacity: 0; transform: scale(.95) translateY(-4px); }
+}
+.gd-ctx-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.gd-ctx-row:hover { background: var(--bg-hover, #f3f4f6); }
+/* 勾选列固定宽度，否则有✓没✓两种行的文字会左右跳 */
+.gd-ctx-chk { width: 14px; color: var(--accent-color, #6366f1); font-weight: 700; }
+.gd-ctx-hr { height: 1px; margin: 5px 6px; background: var(--border-light, #e5e7eb); }
+.gd-ctx-slider {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px 10px;
+}
+.gd-ctx-slider input { flex: 1; }
+.gd-ctx-slider span { min-width: 44px; text-align: right; color: var(--text-secondary, #6b7280); }
+
+/* 侧边栏拖拽把手：按住右边缘直接改宽度，不用去菜单里输数字。
+   8px 足够手指/鼠标命中，视觉上默认完全透明，hover 才显一条线。 */
+.gd-sb-resizer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: col-resize;
+    z-index: 20;
+    background: transparent;
+    touch-action: none;      /* 触屏上不要让浏览器把手势吃成滚动 */
+}
+.gd-sb-resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 2px;
+    background: transparent;
+    transition: background .15s ease;
+}
+.gd-sb-resizer:hover::after,
+.gd-sb-resizer.is-dragging::after {
+    background: var(--accent-primary, #6366f1);
+}
+/* 移动端右边缘要留给「右滑唤出抽屉」手势，拖把会抢掉触摸，
+   而且手机上侧边栏是全屏抽屉，改宽度没意义 —— 直接不渲染。 */
+@media (max-width: 768px) {
+    .gd-sb-resizer { display: none; }
+}
+
+/* ---------- 16.7 自定义：外观变量 ----------
+   ★ 三个变量只作用于内容与侧边栏，不作用在 html 上。
+     全站用 rem，改 html 字号会把侧边栏宽度、按钮内边距一起放大。 */
+.main-content, .sidebar {
+    font-size: var(--gd-fs, 14px);
+    line-height: var(--gd-lh, 1.5);
+    letter-spacing: var(--gd-ls, 0px);
+}
+.gd-look { display: flex; flex-direction: column; gap: 12px; }
+.gd-look label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.gd-look input[type=range] { flex: 1; max-width: 200px; }
+.gd-look span { min-width: 46px; color: var(--text-secondary, #6b7280); }
+.gd-look select { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border-light, #e5e7eb); }
+
+
+/* ==================================================================
+   暗色模式：全局兜底（v75）
+   ------------------------------------------------------------------
+   用户反馈："一处白一处黑，应该全部用暗色"。
+
+   ★ 根因：CSS 里有 23 处硬编码 background:#fff / white，
+     而 body.dark-mode 只逐条覆盖了约 40 个选择器 ——
+     漏掉的那些就露出白底。逐条补是补不完的，以后新增组件还会再漏。
+
+   ★ 所以改成两层：
+     1) 下面这条通配兜底：暗色下凡是还写着白的容器，一律压到暗色底。
+        用 !important 是因为要盖过那些散落各处的硬编码。
+     2) 保留原有的 body.dark-mode 逐条规则（它们负责精细配色）。
+
+   ★ 必须排除的元素：
+     - 用户内容（代码块、日志、预览）本来就该是自己的底色
+     - 图片/图标：压暗底会让透明 PNG 出现色块
+   ================================================================== */
+body.dark-mode :where(
+    .card, .panel, .section, .box, .container, .wrapper,
+    .modal-content, .modal-body, .modal-header, .modal-footer,
+    .dropdown, .dropdown-menu, .popup, .tooltip, .popover,
+    .list, .list-item, .row, .cell, .header, .footer, .sidebar,
+    .toolbar, .breadcrumb, .context-menu, .empty-state,
+    .file-item, .repo-item, .nav-item, .settings-view,
+    .task-item, .stage, .tile, .group, .block, .frame
+) {
+    background-color: var(--bg-secondary);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+/* 上面那条会把所有 .card 之类压成同一个色，
+   主内容区必须保持最深的底，否则整页平掉没有层次 */
+body.dark-mode .main-content,
+body.dark-mode .app,
+body.dark-mode body {
+    background-color: var(--bg-primary) !important;
+    color: var(--text-primary);
+}
+
+/* ★ 内联硬编码颜色的兜底
+   标题写的是内联 style="color:#111827"，内联优先级高于任何 CSS 类，
+   body.dark-mode 的规则根本改不动它 —— 这就是"仪表盘/设置字样看不清"的原因。
+   data-gd-force 由 JS 给这些标题打上，见 js/theme.js */
+body.dark-mode [data-gd-force="title"] {
+    color: var(--text-primary) !important;
+}
+body.dark-mode [data-gd-force="sub"] {
+    color: var(--text-secondary) !important;
+}
+body.dark-mode [data-gd-force="muted"] {
+    color: var(--text-tertiary) !important;
+}
+
+/* 暗色下所有硬编码白底一律压暗（兜底第三层） */
+body.dark-mode [style*="background:#fff"],
+body.dark-mode [style*="background: #fff"],
+body.dark-mode [style*="background:white"],
+body.dark-mode [style*="background: white"],
+body.dark-mode [style*="background:#ffffff"],
+body.dark-mode [style*="background: #ffffff"] {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary);
+}
+
+/* 暗色下硬编码深灰文字 → 提亮，保证对比度 */
+body.dark-mode [style*="color:#111827"],
+body.dark-mode [style*="color: #111827"],
+body.dark-mode [style*="color:#1f2328"],
+body.dark-mode [style*="color: #1f2328"],
+body.dark-mode [style*="color:#374151"],
+body.dark-mode [style*="color: #374151"],
+body.dark-mode [style*="color:#111"],
+body.dark-mode [style*="color: #111"] {
+    color: var(--text-primary) !important;
+}
+/* 中灰次要文字 → 用 secondary，比 tertiary 更可读 */
+body.dark-mode [style*="color:#6b7280"],
+body.dark-mode [style*="color: #6b7280"],
+body.dark-mode [style*="color:#4b5563"],
+body.dark-mode [style*="color: #4b5563"] {
+    color: var(--text-secondary) !important;
+}
+/* 浅灰辅助文字（#9ca3af）在暗底上其实够亮，但偏冷，统一成 tertiary */
+body.dark-mode [style*="color:#9ca3af"],
+body.dark-mode [style*="color: #9ca3af"] {
+    color: var(--text-tertiary) !important;
+}
+
+/* 输入框：暗色下必须显式给底色，否则部分浏览器仍按 UA 白底渲染 */
+body.dark-mode input,
+body.dark-mode textarea,
+body.dark-mode select {
+    background-color: var(--bg-tertiary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+body.dark-mode input::placeholder,
+body.dark-mode textarea::placeholder {
+    color: var(--text-tertiary) !important;
+}
+
+
+/* ==================================================================
+   登录页 UI 大迭代（v75）
+   ------------------------------------------------------------------
+   原来就是一张白卡 + 输入框，确实普通。这版改了这些：
+
+   · 背景：深色渐晕 + 两团缓慢漂移的光斑（纯 CSS，不加载图片）
+   · 卡片：玻璃拟态（毛玻璃 + 细描边），不再是死白一块
+   · Logo：进入时轻微上浮 + 一圈呼吸光环
+   · 输入框：聚焦时描边高亮 + 外发光，右侧加了显示/隐藏按钮
+   · 主按钮：带一道斜向流光，hover 时扫过
+   · 整个卡片：入场时从下方浮起
+
+   ★ 全部尊重 prefers-reduced-motion，见文末的关闭清单。
+   ================================================================== */
+
+/* 背景：两团光斑缓慢漂移。用 radial-gradient 而非图片，零请求。 */
+.login-screen {
+    position: relative;
+    overflow: hidden;
+    background: radial-gradient(1200px 600px at 15% -10%, #eef2ff 0%, transparent 60%),
+                radial-gradient(900px 500px at 100% 100%, #fae8ff 0%, transparent 55%),
+                linear-gradient(160deg, #f8fafc 0%, #eef2f7 100%);
+}
+body.dark-mode .login-screen {
+    background: radial-gradient(1200px 600px at 15% -10%, #1b2a4a 0%, transparent 60%),
+                radial-gradient(900px 500px at 100% 100%, #2a1b3d 0%, transparent 55%),
+                linear-gradient(160deg, #0b0f16 0%, #0d1117 100%);
+}
+.login-screen::before,
+.login-screen::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(60px);
+    opacity: .35;
+    pointer-events: none;   /* ★ 绝不能挡住点击 */
+    animation: gd-orb 18s ease-in-out infinite alternate;
+}
+.login-screen::before {
+    width: 320px; height: 320px; left: -80px; top: -60px;
+    background: linear-gradient(135deg, #6366f1, #22d3ee);
+}
+.login-screen::after {
+    width: 280px; height: 280px; right: -60px; bottom: -40px;
+    background: linear-gradient(135deg, #a855f7, #f472b6);
+    animation-delay: -6s;
+}
+@keyframes gd-orb {
+    from { transform: translate(0, 0) scale(1); }
+    to   { transform: translate(40px, 30px) scale(1.12); }
+}
+
+/* 卡片：玻璃拟态 */
+.login-card {
+    position: relative;
+    z-index: 1;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, .6);
+    box-shadow: 0 18px 50px rgba(15, 23, 42, .13),
+                0 2px 8px rgba(15, 23, 42, .06);
+    animation: gd-card-in .55s cubic-bezier(.22, 1, .36, 1) both;
+}
+body.dark-mode .login-card {
+    border-color: var(--border-color);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
+}
+@keyframes gd-card-in {
+    from { opacity: 0; transform: translateY(22px) scale(.985); }
+}
+
+/* Logo：上浮 + 呼吸光环
+   ★ display:flex 是必需的：.login-logo img 被设成 display:block（清基线间隙），
+     而父级 .login-card 的 text-align:center 对块级元素无效 —— 图标会贴左边缘。
+     flex 居中不破坏 block，光环（absolute 50%）也仍对齐卡片中心。 */
+.login-logo { position: relative; display: flex; justify-content: center; align-items: center; animation: gd-logo-in .6s cubic-bezier(.22,1,.36,1) both .05s; }
+.login-logo::after {
+    content: '';
+    position: absolute; left: 50%; top: 50%;
+    width: 100px; height: 100px; margin: -50px 0 0 -50px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(99,102,241,.28), transparent 70%);
+    animation: gd-halo 3.2s ease-in-out infinite;
+    pointer-events: none;
+}
+@keyframes gd-logo-in { from { opacity: 0; transform: translateY(-10px); } }
+@keyframes gd-halo {
+    0%, 100% { transform: scale(1); opacity: .5; }
+    50%      { transform: scale(1.16); opacity: .85; }
+}
+
+/* 输入框 + 显示/隐藏按钮 */
+.gd-token-wrap { position: relative; }
+.gd-token-wrap input {
+    width: 100%;
+    padding-right: 44px;     /* 给眼睛按钮留位 */
+    transition: border-color .18s, box-shadow .18s;
+}
+.gd-token-wrap input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px var(--accent-light);
+}
+.gd-token-eye {
+    position: absolute; right: 6px; top: 50%;
+    transform: translateY(-50%);
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none;
+    font-size: 15px; cursor: pointer; opacity: .55;
+    border-radius: 6px;
+    transition: opacity .15s, background .15s;
+}
+.gd-token-eye:hover { opacity: 1; background: var(--bg-hover); }
+
+/* 主按钮：斜向流光 */
+#enter-drive-btn {
+    position: relative; overflow: hidden;
+    transition: transform .15s, box-shadow .2s;
+}
+#enter-drive-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(99,102,241,.32); }
+#enter-drive-btn:active { transform: translateY(0); }
+#enter-drive-btn::after {
+    content: '';
+    position: absolute; top: -50%; left: -60%;
+    width: 40%; height: 200%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent);
+    transform: rotate(20deg);
+    animation: gd-shine 4.5s ease-in-out infinite;
+    pointer-events: none;
+}
+@keyframes gd-shine {
+    0%      { left: -60%; }
+    55%,100%{ left: 130%; }
+}
+
+/* ---------- 17. 全部尊重「减少动态效果」----------
+   ★ 每加一个动画，都要来这里登记一次。漏登记的后果是：
+     开了「减少动态效果」的用户仍然看到元素在动，
+     而这个开关往往是晕动症用户在开的。 */
+@media (prefers-reduced-motion: reduce) {
+    .modal-overlay, .modal,
+    .modal-overlay.is-closing, .modal-overlay.is-closing .modal,
+    .file-item, .toast, .progress-bar-fill::after,
+    .gd-ripple, .gd-skel,
+    .empty-state .empty-icon,
+    .upload-drop-zone:hover .upload-drop-icon,
+    .nav-item.active,
+    .file-area.is-switching,
+    .dash-card, .dash-panel {
+        animation: none !important;
+    }
+    /* 涟漪和骨架屏在关闭动画后必须彻底消失，否则会留一坨色块 */
+    .gd-ripple { display: none !important; }
+    .gd-skel { background: #eceef1 !important; }
+    .spinner::after { animation: none !important; display: none; }
+    .modal-overlay.is-closing, .modal-overlay.is-closing .modal { opacity: 0 !important; }
+    .sidebar, .sidebar-overlay, .ctx-menu, .file-item, .file-item .file-icon,
+    .toolbar, .toolbar .search-box input, .nav-item, .dash-card {
+        transition: none !important;
+    }
+    .file-item:hover, .file-item:hover .file-icon { transform: none !important; }
+    .btn-primary:active, .btn-secondary:active, .btn-text:active,
+    .btn-icon:active, .modal-close:active { transform: none !important; }
+}
+
+/* 令牌显示/隐藏：两张图标常驻 DOM，只切 hidden，避免切换时闪一下 */
+.gd-token-eye .gd-eye-img {
+    width: 18px; height: 18px; display: block;
+    opacity: .75; transition: opacity .18s ease;
+}
+.gd-token-eye:hover .gd-eye-img { opacity: 1; }
+.gd-token-eye .gd-eye-img[hidden] { display: none; }
+body.dark-mode .gd-token-eye .gd-eye-img { filter: invert(1) brightness(1.6); }
+
+/* 顶栏常驻后，与当前视图无关的按钮置灰（不隐藏，避免"点了没反应"） */
+.gd-bar-off { opacity: .38; cursor: not-allowed; }

@@ -53,6 +53,21 @@ function makeCtx(branches, plazaEl) {
             getElementById: id => (id === 'version-plaza' ? plazaEl : null),
         },
     };
+    // ★ v79 起 loadVersion 切换前会先探活（_probeBranch），
+    //   它要用 AbortController + fetch(HEAD)。vm 的 context 里默认没有这些，
+    //   缺了会走 catch → 判定"分支不可用" → 合法分支也写不进 localStorage。
+    //   表现是测试红，但代码其实是对的 —— 补齐环境而不是放宽断言。
+    ctx.AbortController = AbortController;
+    ctx.setTimeout = setTimeout;
+    ctx.clearTimeout = clearTimeout;
+    ctx.URLSearchParams = URLSearchParams;
+    ctx.encodeURIComponent = encodeURIComponent;
+    // 探活请求要返回 ok，否则 loadVersion 会在探活那一步就 return
+    const origFetch = ctx.fetch;
+    ctx.fetch = async (u, opt) => {
+        if (opt && opt.method === 'HEAD') return { ok: true, status: 200 };
+        return origFetch(u, opt);
+    };
     ctx.window = ctx;
     ctx.globalThis = ctx;
     vm.createContext(ctx);
@@ -140,11 +155,13 @@ async function main() {
 
     const i4 = Object.create(ctx.__UI.prototype);
     const before = JSON.stringify(ctx.localStorage);
-    ctx.__UI.prototype.loadVersion.call(i4, evilBranch);
+    // ★ v79 起 loadVersion 是 async（切换前要探活），必须 await 再断言。
+    //   不 await 的话断言跑在写 localStorage 之前 —— 测试红，代码没错。
+    await ctx.__UI.prototype.loadVersion.call(i4, evilBranch);
     ck('★ 恶意分支写不进 localStorage',
         ctx.localStorage.getItem('gd_custom_branch') === null,
         String(ctx.localStorage.getItem('gd_custom_branch')));
-    ctx.__UI.prototype.loadVersion.call(i4, 'preview/ok/one');
+    await ctx.__UI.prototype.loadVersion.call(i4, 'preview/ok/one');
     ck('★ 合法分支照常写入', ctx.localStorage.getItem('gd_custom_branch') === 'preview/ok/one');
 
     console.log('\n【5】源码级断言（防止补丁被悄悄移除）');

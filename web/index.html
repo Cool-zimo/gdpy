@@ -8,18 +8,23 @@
     <link rel="icon" type="image/png" sizes="32x32" href="assets/icon-drive-32.png">
     <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-drive-192.png">
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+    <!-- ★ 必须第一个加载：?safe=1 逃生 + 分支名校验要在拼 CDN URL 之前跑完 -->
+    <script src="js/branch-guard.min.js?v=79&api_v=7"></script>
     <script>
     // 分支切换：检测自定义分支，动态加载资源（使用 jsdelivr CDN 加速）
     (function() {
         var customBranch = localStorage.getItem('gd_custom_branch');
         var urlParams = new URLSearchParams(window.location.search);
         var urlBranch = urlParams.get('branch');
-        
-        if (urlBranch) {
+
+        // guard 已经处理过 ?safe=1 / ?branch=main / 非法值，
+        // 这里只需在它没动过 localStorage 时才写 URL 参数
+        if (urlBranch && window.BranchGuard && window.BranchGuard.isValidBranch(urlBranch)
+            && urlBranch !== 'main' && !window.BranchGuard.escapeHatchApplied) {
             customBranch = urlBranch;
             localStorage.setItem('gd_custom_branch', urlBranch);
         }
-        
+
         if (customBranch && customBranch !== 'main') {
             window.__CUSTOM_BRANCH__ = customBranch;
             // 使用 jsdelivr CDN，国内访问更快，支持指定分支
@@ -28,12 +33,12 @@
             // CSS 从 CDN 加载
             document.write('<link rel="stylesheet" href="' + baseUrl + 'css/style.css">');
         } else {
-            document.write('<link rel="stylesheet" href="css/style.css?v=44">');
+            document.write('<link rel="stylesheet" href="css/style.min.css?v=79&api_v=7">');
         }
     })();
     </script>
 </head>
-<body>
+<body class="gd-logged-out" data-api-v="7">
     <!-- 登录页 -->
     <div id="login-screen" class="login-screen">
         <div class="login-card">
@@ -43,7 +48,13 @@
 
             <div class="login-form">
                 <label for="token-input"><span data-i18n="login.tokenLabel">GitHub Personal Access Token</span></label>
-                <input type="password" id="token-input" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+                <div class="gd-token-wrap">
+                    <input type="password" id="token-input" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" spellcheck="false">
+                    <button type="button" class="gd-token-eye" id="token-eye" aria-label="Show/Hide" title="显示/隐藏">
+                        <img class="gd-eye-img" data-state="hidden" src="assets/eye.png" alt="显示" width="18" height="18">
+                        <img class="gd-eye-img" data-state="shown" src="assets/eye-off.png" alt="隐藏" width="18" height="18" hidden>
+                    </button>
+                </div>
                 <p class="token-hint"><span data-i18n="login.tokenHint">需要</span> <code>repo</code> <span data-i18n="login.and">和</span> <code>workflow</code> <span data-i18n="login.permission">权限</span></p>
                 <button id="enter-drive-btn" type="button"><span data-i18n="login.enter">Enter Drive</span></button>
                 <div id="saved-accounts" class="saved-accounts" style="display:none;margin:16px 0;">
@@ -76,6 +87,12 @@
     // 桥接脚本是同步 document.write 加载的，DOMContentLoaded 时必然已就绪。
     (function() {
         function setup() {
+            // ★ 默认不显示仓鼠联动（用户要求）。
+            //   只有当设置里明确打开时才启用 —— 存 gd_bridge_enabled === '1'。
+            //   没开就直接返回，连 Bridge 都不去碰。
+            try {
+                if (localStorage.getItem('gd_bridge_enabled') !== '1') return;
+            } catch (e) { return; }
             var B = window.Bridge;
             if (!B || !B.other || !B.other() || !B.otherHasToken()) return;
             var box = document.getElementById('bridge-box');
@@ -113,6 +130,26 @@
     })();
     </script>
     <script>
+    // 令牌显示/隐藏
+    (function() {
+        var eye = document.getElementById('token-eye');
+        var inp = document.getElementById('token-input');
+        if (!eye || !inp) return;
+        eye.addEventListener('click', function() {
+            var show = inp.type === 'password';
+            inp.type = show ? 'text' : 'password';
+            // 两张图都在 DOM 里，只切 hidden —— 不用等图片加载，也不会闪
+            var imgs = eye.querySelectorAll('.gd-eye-img');
+            for (var k = 0; k < imgs.length; k++) {
+                imgs[k].hidden = ((imgs[k].getAttribute('data-state') === 'shown') !== show);
+            }
+            eye.setAttribute('aria-pressed', show ? 'true' : 'false');
+            // 切完把光标放回末尾，否则会从开头输入
+            try { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } catch (e) {}
+        });
+    })();
+    </script>
+    <script>
     // 登录页显示版本号
     (function() {
         fetch('js/version.js?t=' + Date.now())
@@ -138,35 +175,51 @@
                 <span class="sidebar-title">GitHub Drive</span>
             </div>
             <nav class="sidebar-nav">
+                <!-- 我的文件 -->
                 <div class="nav-section">
                     <div class="nav-section-title"><span data-i18n="sidebar.myFiles">My Files</span></div>
-                    <a href="#" class="nav-item" id="dashboard-nav" data-view="dashboard"><span class="nav-icon">📊</span><span>仪表盘</span></a>
+                    <a href="#" class="nav-item" id="dashboard-nav" data-view="dashboard"><span class="nav-icon"><img src="assets/icons/dashboard-48.png" alt="" width="20" height="20"></span><span>仪表盘</span></a>
                     <a href="#" class="nav-item active" data-view="all-files">
-                        <span class="nav-icon">🗂️</span>
+                        <span class="nav-icon"><img src="assets/icons/allfiles-48.png" alt="" width="20" height="20"></span>
                         <span data-i18n="nav.allFiles">全部文件</span>
                     </a>
                     <a href="#" class="nav-item" data-view="recent">
-                        <span class="nav-icon">🕐</span>
+                        <span class="nav-icon"><img src="assets/icons/recent-48.png" alt="" width="20" height="20"></span>
                         <span data-i18n="nav.recent">最近使用</span>
                     </a>
                     <a href="#" class="nav-item" data-view="starred">
-                        <span class="nav-icon">⭐</span>
+                        <span class="nav-icon"><img src="assets/icons/starred-48.png" alt="" width="20" height="20"></span>
                         <span data-i18n="nav.starred">收藏</span>
                     </a>
                     <a href="#" class="nav-item" data-view="trash">
-                        <span class="nav-icon">🗑️</span>
+                        <span class="nav-icon"><img src="assets/icons/trash-48.png" alt="" width="20" height="20"></span>
                         <span data-i18n="nav.trash">回收站</span>
                     </a>
+                </div>
+
+                <!-- 分享（平铺：和其他分组保持一致，不再折叠） -->
+                <div class="nav-section">
+                    <div class="nav-section-title"><span>分享</span></div>
                     <a href="#" class="nav-item" data-view="shared">
-                        <span class="nav-icon">🔗</span>
+                        <span class="nav-icon"><img src="assets/icons/shared-48.png" alt="" width="20" height="20"></span>
                         <span data-i18n="nav.shared">我的分享</span>
                     </a>
                     <a href="#" class="nav-item" data-view="explore">
-                        <span class="nav-icon">🌐</span>
+                        <span class="nav-icon"><img src="assets/icons/explore-48.png" alt="" width="20" height="20"></span>
                         <span data-i18n="nav.explore">发现分享</span>
                     </a>
-                    <a href="#" class="nav-item" data-view="plugins">
-                        <span class="nav-icon">🧩</span>
+                </div>
+
+                <!-- 后台进程：统一管理所有进度任务 -->
+                <div class="nav-section">
+                    <div class="nav-section-title"><span>任务</span></div>
+                    <a href="#" class="nav-item" id="tasks-nav" data-view="tasks" onclick="ui.showTaskManager();return false;">
+                        <span class="nav-icon"><img src="assets/icons/tasks-48.png" alt="" width="20" height="20"></span>
+                        <span>后台进程</span>
+                        <span class="nav-badge" id="nav-badge-tasks" style="display:none;"></span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="plugins" id="plugins-nav">
+                        <span class="nav-icon"><img src="assets/icons/plugins-48.png" alt="" width="20" height="20"></span>
                         <span data-i18n="nav.plugins">插件广场</span>
                     </a>
                 </div>
@@ -259,13 +312,51 @@
 
     <script>
     // 根据分支动态加载 JS
+    //
+    // ★ 分两组：
+    //   CORE   —— 首屏（登录页）就需要的，同步加载。
+    //   DEFER  —— 只有登录后才用得到，等验证完 token 再加载，
+    //             让"打开页面到能点登录"这段时间尽量短。
+    //             登录本身要发请求验证 token，那点时间足够把这几个拉下来。
     (function() {
         var base = window.__BRANCH_BASE__ || '';
-        var v = window.__BRANCH_BASE__ ? '' : '?v=44';
-        var files = ['bridge', 'icons', 'github-api', 'cangshu-link', 'storage', 'maintain', 'file-manager', 'share', 'config-sync', 'ui', 'i18n', 'version', 'app'];
-        files.forEach(function(f) {
-            document.write('<script src="' + base + 'js/' + f + '.js' + v + '"><\/script>');
+        var CORE = ['icons', 'github-api', 'storage', 'file-manager', 'config-sync', 'task-dock', 'ui', 'i18n', 'version', 'anim', 'gesture', 'custom', 'theme', 'i18n-scan', 'app'];
+        var DEFER = ['bridge', 'cangshu-link', 'maintain', 'share', 'plugin-api'];
+        // ★ 由 build.py 生成：每个文件的内容 hash。
+        //   改哪个文件，只有那个文件的 URL 变，其余继续命中缓存。
+        var GD_HASH = {
+            'anim': 'd823f0bce1',
+            'app': 'f59570579f',
+            'branch-guard': '2a17031683',
+            'bridge': '5cd1cbc1ce',
+            'cangshu-link': 'd87df4f3cb',
+            'config-sync': '7cbbcc1ecd',
+            'custom': '7f8b7f7807',
+            'extension': 'ac2832ce10',
+            'file-manager': '6d3d9fdb9e',
+            'gesture': '4896dd831d',
+            'github-api': '389e7c20c9',
+            'i18n': '7ea34c4dda',
+            'i18n-scan': '04ab5f83ac',
+            'icons': 'ec755c29b9',
+            'maintain': 'b10def0baf',
+            'plugin-api': 'ad584338e1',
+            'share': '27afaa1375',
+            'storage': 'e360e26265',
+            'task-dock': 'b85747e5e4',
+            'theme': '89aafc792a',
+            'ui': 'eb3bf5f72f',
+            'version': 'bdee5be5e6'
+        };
+        function url(f) {
+            // 自定义分支走 jsdelivr，那边自带缓存策略，不加查询串
+            if (base) return base + 'js/' + f + '.js';
+            return 'js/' + f + '.min.js?h=' + (GD_HASH[f] || '0');
+        }
+        CORE.forEach(function(f) {
+            document.write('<script src="' + url(f) + '"><\/script>');
         });
+        window.__GD_DEFER__ = { files: DEFER, url: url };
     })();
     </script>
     <!-- 统一<span data-i18n="btn.upload">Upload</span>弹窗 -->
@@ -333,11 +424,12 @@
             <div class="mobile-nav-item" onclick="app.switchView('favorites')">
                 <span class="icon">⭐</span><span>收藏</span>
             </div>
-            <div class="mobile-nav-item" onclick="app.switchView('plugins')">
-                <span class="icon">🧩</span><span>插件</span>
+            <div class="mobile-nav-item" onclick="ui.showTaskManager()">
+                <span class="icon">⚙️</span><span>后台</span>
+                <span class="mobile-nav-badge" id="mobile-badge-tasks" style="display:none;"></span>
             </div>
-            <div class="mobile-nav-item" onclick="app.showDashboard()">
-                <span class="icon">📊</span><span>仪表盘</span>
+            <div class="mobile-nav-item" onclick="ui.toggleMobileMenu()">
+                <span class="icon">☰</span><span>更多</span>
             </div>
         </div>
     </div>

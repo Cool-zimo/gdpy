@@ -419,9 +419,16 @@ class Storage {
         const prefix = virtualPath === '/drive_home' ? '/drive_home/' : virtualPath + '/';
         const items = [];
 
+        // ★ .trash 是回收站的内部目录，不该出现在"全部文件"里。
+        //   但回收站视图要列它里面的东西 —— 所以只在"当前不在 .trash 里"时隐藏它。
+        //   （不按"名字以 . 开头"一刀切：用户自己的点开头目录不该被顺手藏掉。）
+        const insideTrash = virtualPath.split('/').includes('.trash');
+        const hidden = name => (!insideTrash && name === '.trash');
+
         // 直接子文件
         Object.entries(vfs.files).forEach(([path, info]) => {
             if (path.startsWith(prefix) && !path.substring(prefix.length).includes('/')) {
+                if (hidden(info.name)) return;
                 items.push({ ...info, path, isFile: true });
             }
         });
@@ -429,6 +436,7 @@ class Storage {
         // 直接子文件夹
         Object.entries(vfs.folders).forEach(([path, info]) => {
             if (path.startsWith(prefix) && !path.substring(prefix.length).includes('/')) {
+                if (hidden(info.name)) return;
                 items.push({ ...info, path, isFolder: true });
             }
         });
@@ -644,10 +652,18 @@ class Storage {
      * autoCreateRepo: 容量不足时是否自动创建新仓库
      * repoNamePrefix: 自动创建仓库的名称前缀
      * warnThreshold: 容量警告阈值（0-1），默认 0.8
-     * chunkSize: 文件拆分大小（字节），默认 512KB
-     * minChunkSize: 触发拆分的最小文件大小（字节），默认 512KB
-     *               注：早期文档写的是 10MB，实际默认值一直是 512KB，
-     *               即超过 512KB 的文件就会被分片（而非 10MB 才分）
+     *
+     * ── 分片参数（v45 起语义变了，实测详见 COOL-DOC 的传输性能页）──
+     * maxConcurrency: 并发硬上限，默认 16（实测 24 已劣化）
+     * memoryBudget:   同时编码的字节预算，默认 512MB（决定并发数上限）
+     * chunkSize:     单片**上限**，默认 32MB（旧版是"切分阈值"，语义已废）
+     * minChunkSize:  单片**下限**，默认 1MB
+     * directMaxSize: ≤ 此值走 contents API 直传不切分，默认 1MB
+     *
+     * 为什么改成动态计算：实测发现每片都有 1~2 秒固定开销（HTTPS 握手 +
+     * API 往返），而 commit 固定约 5.7 秒、与文件数无关。所以最优解是
+     * 「片数 ≈ 并发数、单片尽量大、所有片挤进一次 tree + commit」。
+     * 旧的 512KB 固定分片传 1GB 要切 2048 片，实测 16MB 文件就慢 5.2 倍。
      */
     getConfig() { return this.getStorageConfig(); }
     getStorageConfig() {
@@ -656,17 +672,52 @@ class Storage {
             autoCreateRepo: true,
             repoNamePrefix: 'drive-storage',
             warnThreshold: 0.8,
-            chunkSize: 512 * 1024,
-            minChunkSize: 512 * 1024,
-            configVersion: 2
+            // 分片：上限 32MB（blob 实测上限 ~38MB，留 6MB 余量），
+            // 下限 1MB，≤1MB 直传，并发 4
+            chunkSize: 32 * 1024 * 1024,
+            minChunkSize: 1 * 1024 * 1024,
+            directMaxSize: 1 * 1024 * 1024,
+            maxConcurrency: 16,
+            memoryBudget: 512 * 1024 * 1024,
+            configVersion: 3,
+            // 自动整理：**默认开启**（v0.0.64）。
+            //
+            //   v0.0.63 关掉是因为算法错了：旧算法"按整个仓装箱"，
+            //   大仓剩 94MB 装不下小仓 124MB，就直接放弃 ——
+            //   结果仓没少几个，大仓还填不满，等于白跑一趟还倒腾数据。
+            //
+            //   v0.0.64 改成"按分片装箱、把仓填满"后，效果是实打实的：
+            //     3 个仓 → 2 个，大仓 806MB 被填到 900MB，迁移仅 94MB。
+            //   所以重新打开。
+            //
+            //   空仓删掉会少一份额度，但空仓随时能自动重建，代价很小。
+            autoCompact: true,
+            autoCompactDelete: true,
+            autoCompactMaxMoveMB: 300,
+            autoCompactCooldownHours: 24,
+            lastAutoCompactAt: 0
         };
         const saved = this.get(this.keys.STORAGE_CONFIG, null);
         if (!saved) return defaults;
         
-        // 配置迁移：旧版本 chunkSize 是 50MB 或 20MB，自动更新为 5MB
+        // 配置迁移：v3 起 chunkSize 从"切分阈值"变成"单片上限"。
+        // 旧值（含 512KB）全部归一到 32MB —— 沿用旧值会让 1GB 切成 2048 片，
+        // 每片付一遍固定开销，实测慢 5 倍以上。
         let needUpdate = false;
-        if (saved.chunkSize === 50 * 1024 * 1024 || saved.chunkSize === 20 * 1024 * 1024 || saved.chunkSize === 5 * 1024 * 1024) {
-            saved.chunkSize = 512 * 1024;
+        const LEGACY_CHUNK = [
+            50 * 1024 * 1024, 20 * 1024 * 1024, 10 * 1024 * 1024,
+            5 * 1024 * 1024, 512 * 1024
+        ];
+        if (LEGACY_CHUNK.includes(saved.chunkSize)) {
+            saved.chunkSize = defaults.chunkSize;
+            needUpdate = true;
+        }
+        if (LEGACY_CHUNK.includes(saved.minChunkSize)) {
+            saved.minChunkSize = defaults.minChunkSize;
+            needUpdate = true;
+        }
+        if (saved.configVersion !== defaults.configVersion) {
+            saved.configVersion = defaults.configVersion;
             needUpdate = true;
         }
         // 确保所有字段都存在

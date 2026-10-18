@@ -54,7 +54,22 @@ const ck = (l, c, e) => { c ? (pass++, console.log('  ✓ ' + l)) : (fail++, con
     const srcs = await page.evaluate(() => [...document.querySelectorAll('script[src]')].map(s => s.getAttribute('src')));
     ck('★ 所有 script 都是相对路径（无 jsdelivr）',
         srcs.every(s => !s.includes('jsdelivr')), srcs.filter(s => s.includes('jsdelivr')));
-    ck('  13 个 js 全部加载', srcs.filter(s => s.startsWith('js/')).length === 13, srcs.length);
+    // ★ 原来是硬编码 13 —— 网页版从 v44 到 v79 新增了 7 个模块
+    //   （anim/gesture/custom/theme/i18n-scan/plugin-api/task-dock/branch-guard），
+    //   数字一变测试就红，而红的原因跟"有没有 bug"毫无关系。
+    //   改成从 index.html 解析 CORE 清单，新增模块自动被覆盖。
+    // CORE 是 index.html 里的局部变量，页面上看不到；直接从源码解析
+    const idxHtml = require('fs').readFileSync(
+        require('path').resolve(__dirname, '../../web/index.html'), 'utf8');
+    const coreList = (idxHtml.match(/var CORE = \[([^\]]*)\]/) || [, ''])[1]
+        .split(',').map(x => x.trim().replace(/['"]/g, '')).filter(Boolean);
+    const loaded = srcs.filter(s => s.startsWith('js/'));
+    ck('  CORE 清单里的 js 全部加载',
+        coreList.length > 0 && coreList.every(f => loaded.some(s => s.startsWith('js/' + f + '.js'))),
+        { core: coreList.length, loaded: loaded.length });
+    // ★ 桌面版必须走未压缩源码（min.js 由网页版构建生成，改了源码它不会跟着变）
+    ck('★ 桌面版加载的是 .js 而不是 .min.js',
+        loaded.every(s => !s.includes('.min.js')), loaded.filter(s => s.includes('.min.js')));
 
     console.log('\n【3】★ window.open 改道到系统浏览器');
     await page.evaluate(() => { window.__calls = []; window.open('https://github.com/Cool-zimo/gdpy', '_blank'); });
