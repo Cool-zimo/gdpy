@@ -226,6 +226,48 @@ ck('★ 显式开启后放行（黑名单仍生效）', b3.exec_enabled() is Tru
 r3 = b3.exec_command({'cmd': 'shutdown -h now'})
 ck('★ 开启后黑名单仍拦截', r3.get('blocked') is True)
 
+print('\n【10】★★ 桌面壳层的两个"默认关闭"开关')
+
+# 这两个都是 pywebview 的**默认值就是错的**，且不报任何错：
+#   启动 → 界面正常 → 功能悄悄不能用 / 数据悄悄丢
+# 没有源码级断言就会一直绿，所以这里用文本检查锁住。
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MAIN_PY = os.path.join(ROOT, 'webview_main.py')
+src = open(MAIN_PY, encoding='utf-8').read()
+
+# ① private_mode —— 默认 True 会让 localStorage 每次退出被删光
+#
+#   edgechromium 的 clear_user_data()：shutil.rmtree(user_data_folder)。
+#   前端令牌 / 语言 / 插件配置 / 后端配置 / 缓存全在 localStorage，
+#   于是每次关闭程序都要重新登录 —— 桌面版"跑不动"最直观的症状。
+ck('★ private_mode 显式关闭', 'private_mode=False' in src)
+ck('★ 指定了 storage_path（不落临时目录）', 'storage_path=' in src)
+ck('★ 启动调用里带了这两个参数',
+   'webview.start(debug=False, private_mode=False' in src)
+
+# ② ALLOW_DOWNLOADS —— 默认 False 会把下载静默取消
+#
+#   on_download_starting: if not ALLOW_DOWNLOADS: args.Cancel = True
+#   前端下载走 a.download + blob URL，点了像没点：没有对话框、没有报错。
+#   网盘的主功能就是下载。
+ck('★ 打开了 ALLOW_DOWNLOADS', "webview.settings['ALLOW_DOWNLOADS'] = True" in src)
+
+# ③ 这两个设置在 start() **之前**才生效 —— 顺序错了等于没写
+i_dl = src.find('ALLOW_DOWNLOADS')
+i_start = src.find('webview.start(')
+ck('★ 设置在 start() 之前', 0 <= i_dl < i_start,
+   'ALLOW_DOWNLOADS@%d start@%d' % (i_dl, i_start))
+
+print('\n【11】★ shim 不去重复框架已经做的事')
+
+shim = open(SHIM_PATH, encoding='utf-8').read()
+# 三个平台都自带 target=_blank 外链处理（OPEN_EXTERNAL_LINKS_IN_BROWSER 默认 True）。
+# 再拦一次不仅多余，还会因为白名单挡掉别人的 github.io 分享页。
+ck('★ 没有 document 级 click 拦截 _blank',
+   "addEventListener('click'" not in shim)
+# window.open 的覆盖要留：macOS 上原生只处理链接点击，不处理 JS 调用
+ck('★ 仍覆盖 window.open（macOS 需要）', 'window.open = function' in shim)
+
 print('\n' + '='*46)
 print('  %d 通过 / %d 失败' % (passed, failed))
 print('='*46)

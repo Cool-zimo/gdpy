@@ -64,6 +64,23 @@
         return origOpen(url, target, features);
     };
 
+    // ★ 这里**不要**再去拦 <a target="_blank"> 的点击 —— 框架已经做了。
+    //
+    //   我第一版加了 document 级 click 拦截，后来去读 pywebview 源码发现
+    //   三个平台都自带外链处理，且默认就是开着的：
+    //     edgechromium: CoreWebView2.NewWindowRequested → webbrowser.open
+    //     cocoa:        createWebViewWithConfiguration  → webbrowser.open
+    //     gtk:          frame_name == '_blank'          → webbrowser.open
+    //   开关是 settings['OPEN_EXTERNAL_LINKS_IN_BROWSER']，默认 True。
+    //
+    //   再拦一次不仅多余，还会引入回归：拦截走我们的域名白名单，
+    //   别人的 github.io 分享页不在白名单里就被挡掉了，
+    //   而原生路径本来是能打开的。
+    //
+    //   window.open() 的覆盖仍然要留 —— 那个在 macOS 上原生不生效
+    //   （cocoa 只处理 WKNavigationTypeLinkActivated，即链接点击，
+    //    JS 调 window.open 触发的是 Other，不会进那个分支）。
+
     /* ---------- 3. fetch 改道 ---------- */
 
     function isSameOrigin(url) {

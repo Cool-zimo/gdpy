@@ -96,6 +96,19 @@ jobs:
           else
             echo "=== 跳过 js 测试（本 runner 没有 node）===" | tee -a smoke.log
           fi
+
+          # ★★ 第三次踩同一个坑：tools/check_resources.py 写好了，
+          #   但**没有任何地方调用它** —— 既不在这段 CI 里，也不在任何
+          #   测试里。它实际处于失败状态（2 个文件未声明），却没人知道。
+          #
+          #   「写了检查但没人跑」比「没写检查」更危险：
+          #   它会给人一种"已经有人盯着"的错觉。
+          #   现在接进这里，并且每次新增测试文件不会再让它变红
+          #   （豁免已改成按 tests/ 目录，不再逐文件维护）。
+          echo "=== check_resources ==="
+          python tools/check_resources.py 2>&1 | tee -a smoke.log
+          [ "${PIPESTATUS[0]}" -ne 0 ] && ok=1
+
           echo "exitcode=$ok" >> $GITHUB_OUTPUT
 
       - name: 上传测试日志（无论如何）

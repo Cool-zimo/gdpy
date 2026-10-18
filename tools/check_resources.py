@@ -24,8 +24,14 @@ EXEMPT = {
         '而是内嵌，从根上不依赖外部文件。'
     ),
     'tools/quark.json': '站点生成用（tools/gen_site.py），运行时不读',
-    'tests/js/test_maintain.js': '前端 js 单元测试（node 跑），不进产物',
-    'tests/js/test_breadcrumb.js': '前端 js 单元测试（node 跑），不进产物',
+}
+
+# ★ 按前缀豁免 —— 曾经这里是逐文件写死两个 tests/js/*.js。
+#   后来新增 test_plaza_xss.js / test_shim.cjs 没同步进来，脚本立刻变红：
+#   「每加一个测试文件就要改一次豁免清单」本身就是设计缺陷。
+#   测试代码整体不属于产物，按目录豁免一次到位。
+EXEMPT_PREFIXES = {
+    'tests/': '测试代码（pytest / node 跑），不属于产物',
 }
 
 SKIP_DIRS = {'.git', '__pycache__', 'build', 'dist', '.github',
@@ -56,6 +62,10 @@ def scan(root='.'):
                 continue
             if rel in EXEMPT:
                 exempt_hit.append((rel, EXEMPT[rel]))
+                continue
+            pre = next((p for p in EXEMPT_PREFIXES if rel.startswith(p)), None)
+            if pre:
+                exempt_hit.append((rel, EXEMPT_PREFIXES[pre]))
                 continue
             top = rel.split('/')[0]
             covered = any(rel in d or top in d for d in declared)

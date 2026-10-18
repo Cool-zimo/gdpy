@@ -162,13 +162,13 @@ class Bridge:
                 return {'status': 0, 'status_text': 'body_b64 不是合法 base64'}
 
         # ★ 去掉浏览器语义的头 —— 交给 urllib 自己管，不然会出错
-        for k in list(headers.keys()):
-            if k.lower() in ('content-length', 'host', 'connection',
-                             'origin', 'referer', 'accept-encoding'):
-                del headers[k]
-        headers.pop('Content-Length', None)
-
-        # 浏览器语义的头不能透传，交给连接层自己管
+        #
+        #   content-length 最容易出问题：浏览器算的是字符数，而我们要发的是
+        #   UTF-8 字节数，中文 body 下两者不等，服务端会一直等一个永远
+        #   不会到齐的长度。
+        #
+        #   ★ 这里曾经有两段几乎一样的循环（第二段多了 transfer-encoding），
+        #     第一段完全被第二段覆盖 —— 纯冗余。留一份，且以第二份为准。
         for k in list(headers.keys()):
             if k.lower() in ('content-length', 'host', 'connection',
                              'origin', 'referer', 'accept-encoding',
