@@ -71,6 +71,28 @@ const ck = (l, c, e) => { c ? (pass++, console.log('  ✓ ' + l)) : (fail++, con
     ck('★ 桌面版加载的是 .js 而不是 .min.js',
         loaded.every(s => !s.includes('.min.js')), loaded.filter(s => s.includes('.min.js')));
 
+    console.log('\n【2.5】★ 桥失败（status 0）不抛 RangeError');
+    // 桥用 status 0 表示"请求没发出去"（域名不在白名单/网络失败/超时）。
+    // 早期直接 new Response(body,{status:0}) 抛 RangeError，
+    // 前端拿到 e.status === undefined → 显示「登录失败: RangeError: ...」，
+    // 真实原因（status_text）被吞掉，看起来像权限问题。
+    const r0 = await page.evaluate(async () => {
+        // ★ 测完必须还原 —— 后面【5】"桥就绪时走桥"用的是同一个 mock，
+        //   不还原会让它也拿到 status 0，表现为后面的用例莫名其妙地红。
+        const orig = window.pywebview.api.http_request;
+        window.pywebview.api.http_request = async () => ({
+            status: 0, status_text: '域名不在白名单：evil.com', headers: {}, body_b64: ''
+        });
+        let out;
+        try { await window.fetch('https://evil.com/x'); out = { threw: false }; }
+        catch (e) { out = { threw: true, name: e.name, msg: String(e.message), status: e.status }; }
+        window.pywebview.api.http_request = orig;
+        return out;
+    });
+    ck('★ status 0 不抛 RangeError', !/RangeError/.test(r0.name || ''), r0);
+    ck('★ status 0 的 Error 带真实原因', /域名不在白名单/.test(r0.msg || ''), r0);
+    ck('★ status 0 保留 status 字段（区别于 401/403）', r0.status === 0, r0);
+
     console.log('\n【3】★ window.open 改道到系统浏览器');
     await page.evaluate(() => { window.__calls = []; window.open('https://github.com/Cool-zimo/gdpy', '_blank'); });
     await page.waitForTimeout(400);

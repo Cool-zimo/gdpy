@@ -19,6 +19,20 @@ def _resource(rel):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
 
 
+def _window_icon():
+    """运行时窗口图标路径，取不到返回 None
+
+    ★ 只带 assets/icon.png 一个文件进包（95 KB）。
+      .ico / .icns 是给 PyInstaller --icon 用的构建期文件，
+      每个平台只需要自己那一款，没必要三份都塞进产物。
+    """
+    for rel in ('assets/icon.png', 'assets/icon.ico', 'assets/icon.icns'):
+        p = _resource(rel)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def _exec_flag():
     """是否允许页面执行外部命令
 
@@ -103,6 +117,17 @@ def main():
         url,
         js_api=api,
         width=1180, height=760, min_size=(900, 560),
+        # ★ 窗口图标（标题栏 / 任务栏 / Dock）
+        #
+        #   PyInstaller 的 --icon 只改**文件本身**在资源管理器里的图标
+        #   （Windows 生效；macOS 在 --onefile 下没有 .app bundle，
+        #   所以那边的 --icon 基本不起作用）。
+        #   真正让用户看到的窗口图标要靠 create_window 的 icon 参数。
+        #
+        #   按平台挑格式找不到就读不到 —— 直接崩窗口，
+        #   所以取不到就传 None（退回 pywebview 默认图标），
+        #   图标缺了不该让程序起不来。
+        icon=_window_icon(),
     )
     api.window = win
 

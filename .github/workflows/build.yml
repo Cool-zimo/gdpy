@@ -172,10 +172,26 @@ jobs:
           #   留着它们只会白增大 exe。
           SEP=":"
           if [ "$RUNNER_OS" = "Windows" ]; then SEP=";"; fi
+
+          # ★ 应用图标
+          #   两件事，别混为一谈：
+          #     --icon      → 文件在资源管理器 / Finder 里显示的图标
+          #     --add-data  → 运行时窗口标题栏 / 任务栏的图标
+          #                    （由 webview_main.py 的 _window_icon() 读取）
+          #   Windows 要 .ico、macOS 要 .icns，给错格式 PyInstaller 会直接失败。
+          #   macOS 用 --onefile 时没有 .app bundle，--icon 实际不生效，
+          #   那边真正起作用的是运行时那张 png。
+          ICON="assets/icon.png"
+          if [ "$RUNNER_OS" = "Windows" ]; then ICON="assets/icon.ico"; fi
+          if [ "$RUNNER_OS" = "macOS" ]; then ICON="assets/icon.icns"; fi
+          echo "使用图标: $ICON"
+
           pyinstaller --noconfirm --clean --onefile --windowed \
             --name gdpy \
+            --icon "$ICON" \
             --add-data "web${SEP}web" \
             --add-data "plugins${SEP}plugins" \
+            --add-data "assets/icon.png${SEP}assets" \
             --collect-submodules gdrive \
             --hidden-import gdrive.core.api \
             --hidden-import gdrive.core.config \

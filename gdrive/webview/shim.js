@@ -131,8 +131,30 @@
 
     function makeResponse(res) {
         var status = res.status || 0;
+
+        // ★★ status 0 不是 HTTP 状态码 —— 桥用它表示"请求根本没发出去"
+        //   （域名不在白名单 / 网络失败 / 超时）。
+        //   直接 `new Response(body, {status: 0})` 会抛
+        //     RangeError: The status provided (0) is outside the range [200, 599]
+        //   前端 catch 到的是一个 RangeError，e.status 是 undefined ——
+        //   于是走通用分支显示「登录失败: RangeError: ...」，
+        //   真正的失败原因（status_text 里的"域名不在白名单"）被整个吞掉。
+        //
+        //   实测：用真实 token 跑端到端，页面报的就是这个 RangeError，
+        //   而同一个 token 直接打 API 三个端点全是 200。
+        //   —— 看起来像"权限问题"，实际是请求压根没发出去。
+        //
+        //   这里抛一个带 status 和 message 的 Error：
+        //   status 保留 0（区别于 401/403），message 用桥给的真实原因。
+        if (!status) {
+            var e0 = new Error((res.status_text || '请求失败') );
+            e0.status = 0;
+            e0.isBridgeFailure = true;
+            throw e0;
+        }
+
         // 204/304/205 不允许有 body —— 带 body 构造 Response 会抛 TypeError
-        var noBody = (status === 204 || status === 304 || status === 205 || status === 0);
+        var noBody = (status === 204 || status === 304 || status === 205);
         var body = null;
         if (!noBody && res.body_b64) body = b64ToBytes(res.body_b64);
         return new Response(body, {
@@ -155,6 +177,13 @@
         //   也不要像以前那样静默什么都不做。
         var api = window.pywebview && window.pywebview.api;
         if (!api || !api.http_request) return origFetch(input, init);
+
+        // ★ 桌面版专属诊断：把失败请求落到 js.log（AppData/gdpy/js.log）。
+        //   Windows 下没有控制台也没法开 DevTools，"提示没有权限"却查不到
+        //   到底哪个请求失败、为什么失败 —— 只能靠猜。记一条就够定位。
+        function _diag(tag, detail) {
+            try { if (api.js_log) api.js_log({ msg: '[net] ' + tag + ' ' + detail }); } catch (e) { }
+        }
 
         var method = (init && init.method) || 'GET';
         var headers = collectHeaders(init);
@@ -180,7 +209,12 @@
             url: url,
             headers: headers,
             body_b64: body
-        }).then(makeResponse);
+        }).then(function (res) {
+            if (!res || !res.status) {
+                _diag('FAIL', method + ' ' + url + ' → ' + ((res && res.status_text) || '未知'));
+            }
+            return makeResponse(res);
+        });
     };
 
     /* ---------- 4. 桌面原生能力 ---------- */

@@ -24,6 +24,15 @@ EXEMPT = {
         '而是内嵌，从根上不依赖外部文件。'
     ),
     'tools/quark.json': '站点生成用（tools/gen_site.py），运行时不读',
+    'assets/icon.ico': (
+        '★ 只给 Windows 的 PyInstaller --icon 用（构建期）。'
+        '另外两款平台用不到它，打包进去纯属浪费。'
+    ),
+    'assets/icon.icns': (
+        '★ 只给 macOS 的 PyInstaller --icon 用（构建期），同一理由。'
+        '且 macOS 走 --onefile 没有 .app bundle，--icon 实际不生效 ——'
+        '那边真正显示图标的是运行时那张 icon.png。'
+    ),
 }
 
 # ★ 按前缀豁免 —— 曾经这里是逐文件写死两个 tests/js/*.js。
@@ -74,9 +83,40 @@ def scan(root='.'):
     return missing, exempt_hit
 
 
+# ★ web/ 整体在 SKIP_DIRS 里（它由 sync_web.py 从 github_drive 同步而来，
+#   不是我们手写的），但其中有几个是**缺了就整个应用起不来**的关键文件，
+#   必须单独点名检查。
+#
+#   ★★ 这段代码原本放在文件最末尾，也就是
+#       `if __name__ == '__main__': sys.exit(main())` **之后** ——
+#       sys.exit 一调用进程就结束了，后面的语句永远不会执行，
+#       而且里面还用了根本没定义的 ROOT（真跑起来会 NameError）。
+#
+#       于是这个检查从写下那一刻起就没生效过，却一直给人
+#       "已经有人盯着"的错觉 —— 跟 CI 里那三次「写了测试没人跑」
+#       是完全同一个坑，这次是在检查脚本自己身上。
+#       现在挪进 main()，真正执行。
+WEB_CRITICAL = [
+    ('web/index.html', '整个前端的入口'),
+    ('web/js/maintain.js', '面包屑常量定义在这里；缺了 getBreadcrumbs 会 ReferenceError'),
+    ('web/js/app.js', '主应用逻辑'),
+    ('web/js/file-manager.js', '文件列表与上传下载'),
+]
+
+
+def check_web(root):
+    """返回缺失的关键前端文件列表"""
+    bad = []
+    for rel, why in WEB_CRITICAL:
+        if not os.path.isfile(os.path.join(root, rel)):
+            bad.append((rel, why))
+    return bad
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else '.'
     missing, exempt = scan(root)
+    web_bad = check_web(root)
     print('=' * 60)
     print('打包资源检查  (root=%s)' % root)
     print('=' * 60)
@@ -86,7 +126,14 @@ def main():
     print('\n★ 未声明 %d 个：' % len(missing))
     for p in sorted(missing):
         print('  ✗ %s' % p)
+    print('\n★ 关键前端文件 %d 项：' % len(WEB_CRITICAL))
+    for rel, why in WEB_CRITICAL:
+        ok = not any(rel == b[0] for b in web_bad)
+        print('  %s %-28s %s' % ('✓' if ok else '✗', rel, '' if ok else why))
     print('\n' + '=' * 60)
+    if web_bad:
+        print('失败：关键前端文件缺失，先跑 tools/sync_web.py')
+        return 1
     if missing:
         print('失败：有资源未声明 --add-data')
         print('（若确认不需要进包，请加进 EXEMPT 并写明理由）')
@@ -97,14 +144,3 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
-# ★ js/maintain.js 必须存在于 web/ —— 面包屑常量定义在里面
-#   缺失时 file-manager.js 的 getBreadcrumbs 会 ReferenceError，
-#   表现为整个文件列表打不开（V0.0.4 shim.js 同类问题）
-_mf = os.path.join(ROOT, 'web', 'js', 'maintain.js')
-if not os.path.isfile(_mf):
-    print('✗ web/js/maintain.js 不存在（面包屑依赖它定义的常量）')
-    print('  先跑： GITHUB_TOKEN=xxx python tools/sync_web.py')
-    bad.append('web/js/maintain.js')
-else:
-    print('✓ web/js/maintain.js 已同步')
