@@ -185,6 +185,27 @@
             try { if (api.js_log) api.js_log({ msg: '[net] ' + tag + ' ' + detail }); } catch (e) { }
         }
 
+        // ★★ 桌面版不支持社区版本（分支预览）—— 直接回答"不可用"
+        //
+        //   v79 起版本广场会逐个探活：
+        //     https://cdn.jsdelivr.net/gh/Cool-zimo/github_drive@<分支>/css/style.css
+        //   而这个域名不在桥的白名单里（白名单只放行 GitHub 自家域名 +
+        //   raw/codeload/objects 等），于是桥返回 status 0 ——
+        //   早期实现下那会抛 RangeError，表现为「一打开设置就蹦出一堆
+        //   莫名其妙的错」，而真实原因只是"这个域名桌面版不许访问"。
+        //
+        //   这里直接回 404。前端 _probeBranch 拿到 !ok 就把该分支标成
+        //   「✗ 不可用」—— 语义本来就是对的：桌面版永远用打包进来的
+        //   本地代码，确实加载不了社区版本。
+        if (/^https?:\/\/cdn\.jsdelivr\.net\//i.test(url)) {
+            return Promise.resolve(makeResponse({
+                status: 404,
+                status_text: 'Not Found',
+                headers: { 'content-type': 'application/json' },
+                body_b64: ''
+            }));
+        }
+
         var method = (init && init.method) || 'GET';
         var headers = collectHeaders(init);
         var body = null;

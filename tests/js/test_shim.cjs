@@ -93,6 +93,24 @@ const ck = (l, c, e) => { c ? (pass++, console.log('  ✓ ' + l)) : (fail++, con
     ck('★ status 0 的 Error 带真实原因', /域名不在白名单/.test(r0.msg || ''), r0);
     ck('★ status 0 保留 status 字段（区别于 401/403）', r0.status === 0, r0);
 
+    console.log('\n【2.6】★ 版本广场探活（jsdelivr）在桌面版返回「不可用」');
+    // v79 版广场会探活 cdn.jsdelivr.net，该域名不在桥的白名单里。
+    // 早期走桥 → status 0 → RangeError，一打开设置就蹦一堆莫名其妙的错。
+    const rp = await page.evaluate(async () => {
+        const orig = window.pywebview.api.http_request;
+        let used = false;
+        window.pywebview.api.http_request = async () => { used = true; return { status: 0, status_text: 'x' }; };
+        let out;
+        try {
+            const r = await window.fetch('https://cdn.jsdelivr.net/gh/Cool-zimo/github_drive@main/css/style.css', { method: 'HEAD' });
+            out = { status: r.status, ok: r.ok };
+        } catch (e) { out = { threw: true, msg: String(e.message) }; }
+        window.pywebview.api.http_request = orig;
+        return { ...out, usedBridge: used };
+    });
+    ck('★ jsdelivr 探活返回 404（而不是抛错）', rp.status === 404, rp);
+    ck('★ jsdelivr 探活不惊动桥（不浪费一次网络往返）', rp.usedBridge === false, rp);
+
     console.log('\n【3】★ window.open 改道到系统浏览器');
     await page.evaluate(() => { window.__calls = []; window.open('https://github.com/Cool-zimo/gdpy', '_blank'); });
     await page.waitForTimeout(400);
