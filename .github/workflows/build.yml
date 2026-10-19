@@ -97,6 +97,20 @@ jobs:
             echo "=== 跳过 js 测试（本 runner 没有 node）===" | tee -a smoke.log
           fi
 
+          # ★★ 第四次：网页版自带的前端测试（web/js/test_*.mjs）随
+          #   sync_web 同步进来，但 glob 里没有 .mjs —— 又是一批
+          #   "躺着没人跑"的测试。v0.0.87 同步进来的 test_v83.mjs
+          #   有 23 项，测的是跨账号归属校验（正是最新版改的东西）。
+          if command -v node >/dev/null 2>&1; then
+            for f in web/js/test_*.mjs; do
+              [ -f "$f" ] || continue
+              t=$(basename "$f")
+              echo "=== $t (网页版自带) ==="
+              node "$f" 2>&1 | tee -a smoke.log
+              [ "${PIPESTATUS[0]}" -ne 0 ] && ok=1
+            done
+          fi
+
           # ★★ 第三次踩同一个坑：tools/check_resources.py 写好了，
           #   但**没有任何地方调用它** —— 既不在这段 CI 里，也不在任何
           #   测试里。它实际处于失败状态（2 个文件未声明），却没人知道。
