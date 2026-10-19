@@ -4,12 +4,46 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GitHub Drive - Virtual File System based on GitHub</title>
+    <!-- ★ 静态 <link>，不是 JS 拼出来的。
+         原来是内联脚本 document.write 出这行 —— 浏览器的预加载扫描器
+         只扫 HTML 文本、不执行 JS，看不见它，必须等 HTML 下载完、那段 JS
+         跑完才发起请求，白等一个 RTT。CSS 是渲染阻塞资源，这个 RTT
+         直接压在首屏上。写死之后，扫描器在 HTML 头几个字节就能发现。 -->
+    <link rel="stylesheet" href="css/style.min.css?h=d12560c6e8" data-gd-css="local">
+    <!-- ★ --stamp 原本写在 css 里，每次 bump 都会改 CSS 内容，导致内容 hash 变化、
+         66KB 的样式表每次升级都要重新下载。移到内联之后：改 JS 不动 CSS，hash 就不变，
+         样式表继续命中缓存。content-hash 已经保证 CSS 不会是旧的，
+         这条戳现在只用于让兼容性自检有值可读。 -->
+    <style>#gd-css-stamp{--stamp:"87"}</style>
     <!-- 品牌图标：用真实 PNG 而非 emoji，避免各浏览器字形不一致 -->
     <link rel="icon" type="image/png" sizes="32x32" href="assets/icon-drive-32.png">
     <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-drive-192.png">
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
     <!-- ★ 必须第一个加载：?safe=1 逃生 + 分支名校验要在拼 CDN URL 之前跑完 -->
-    <script src="js/branch-guard.min.js?v=79&api_v=7"></script>
+    <script src="js/branch-guard.min.js?v=87&api_v=7"></script>
+    <!-- ★ CORE 静态化 + defer。
+         原来这 15 个是内联 JS 用 document.write 拼 URL 后插入的，
+         扫描器看不见；改成写死后与 CSS 一起被扫描器发现，并行下载。
+         defer 保证：并行下载、不阻塞 HTML 解析、按书写顺序执行
+         （等价原来 document.write 的同步顺序，ui.js 依赖 i18n.js 等
+         跨文件顶层符号，顺序不能乱）。
+         放在 head 里是为了让扫描器尽可能早地撞见它们。 -->
+    <script defer src="js/icons.min.js?h=ec755c29b9" data-gd-core="icons"></script>
+    <script defer src="js/github-api.min.js?h=389e7c20c9" data-gd-core="github-api"></script>
+    <script defer src="js/storage.min.js?h=a79316a960" data-gd-core="storage"></script>
+    <script defer src="js/file-manager.min.js?h=6835a33a91" data-gd-core="file-manager"></script>
+    <script defer src="js/config-sync.min.js?h=7cbbcc1ecd" data-gd-core="config-sync"></script>
+    <script defer src="js/task-dock.min.js?h=b85747e5e4" data-gd-core="task-dock"></script>
+    <script defer src="js/ui.min.js?h=a6e58cbbaf" data-gd-core="ui"></script>
+    <script defer src="js/i18n.min.js?h=7ea34c4dda" data-gd-core="i18n"></script>
+    <script defer src="js/version.min.js?h=6110e86c06" data-gd-core="version"></script>
+    <script defer src="js/anim.min.js?h=d823f0bce1" data-gd-core="anim"></script>
+    <script defer src="js/gesture.min.js?h=4896dd831d" data-gd-core="gesture"></script>
+    <script defer src="js/custom.min.js?h=54c27932cc" data-gd-core="custom"></script>
+    <script defer src="js/theme.min.js?h=b0ec742409" data-gd-core="theme"></script>
+    <script defer src="js/i18n-scan.min.js?h=04ab5f83ac" data-gd-core="i18n-scan"></script>
+    <script defer src="js/app.min.js?h=7efd28e5e2" data-gd-core="app"></script>
+
     <script>
     // 分支切换：检测自定义分支，动态加载资源（使用 jsdelivr CDN 加速）
     (function() {
@@ -30,10 +64,10 @@
             // 使用 jsdelivr CDN，国内访问更快，支持指定分支
             var baseUrl = 'https://cdn.jsdelivr.net/gh/Cool-zimo/github_drive@' + customBranch + '/';
             window.__BRANCH_BASE__ = baseUrl;
-            // CSS 从 CDN 加载
+            // CSS 从 CDN 加载。本地那份已经由上面的静态 <link> 下载了，
+            // 这里靠层叠顺序（后出现的优先）覆盖它。自定义分支只在开发者
+            // 调试时出现，多下这一份的代价可以接受。
             document.write('<link rel="stylesheet" href="' + baseUrl + 'css/style.css">');
-        } else {
-            document.write('<link rel="stylesheet" href="css/style.min.css?v=79&api_v=7">');
         }
     })();
     </script>
@@ -326,14 +360,14 @@
         //   改哪个文件，只有那个文件的 URL 变，其余继续命中缓存。
         var GD_HASH = {
             'anim': 'd823f0bce1',
-            'app': 'f59570579f',
+            'app': '5a087407ce',
             'branch-guard': '2a17031683',
             'bridge': '5cd1cbc1ce',
             'cangshu-link': 'd87df4f3cb',
-            'config-sync': '7cbbcc1ecd',
-            'custom': '7f8b7f7807',
+            'config-sync': '22cd08358d',
+            'custom': '54c27932cc',
             'extension': 'ac2832ce10',
-            'file-manager': '6d3d9fdb9e',
+            'file-manager': '6835a33a91',
             'gesture': '4896dd831d',
             'github-api': '389e7c20c9',
             'i18n': '7ea34c4dda',
@@ -342,20 +376,36 @@
             'maintain': 'b10def0baf',
             'plugin-api': 'ad584338e1',
             'share': '27afaa1375',
-            'storage': 'e360e26265',
+            'storage': '5635ff33ec',
             'task-dock': 'b85747e5e4',
-            'theme': '89aafc792a',
-            'ui': 'eb3bf5f72f',
-            'version': 'bdee5be5e6'
+            'theme': 'b0ec742409',
+            'ui': '55a5ab51fa',
+            'version': 'b6be41f158'
         };
         function url(f) {
             // 自定义分支走 jsdelivr，那边自带缓存策略，不加查询串
             if (base) return base + 'js/' + f + '.js';
             return 'js/' + f + '.min.js?h=' + (GD_HASH[f] || '0');
         }
-        CORE.forEach(function(f) {
-            document.write('<script src="' + url(f) + '"><\/script>');
-        });
+        // ★ CORE 已经在 head 里以静态 <script defer> 加载，这里不再
+        //   document.write 一遍。
+        //
+        //   自定义分支时才需要额外拉 CDN 那份。必须等 DOMContentLoaded 之后
+        //   —— 本地 defer 脚本在它之前执行，如果这里也用 document.write
+        //   同步插入，CDN 版本会先跑、然后被本地 defer 版反过来覆盖，
+        //   结果是"切了分支却还是旧代码"，且毫无报错。
+        if (base) {
+            window.addEventListener('DOMContentLoaded', function () {
+                var i = 0;
+                (function next() {
+                    if (i >= CORE.length) return;
+                    var s = document.createElement('script');
+                    s.src = url(CORE[i++]);
+                    s.onload = s.onerror = next;
+                    document.head.appendChild(s);
+                })();
+            });
+        }
         window.__GD_DEFER__ = { files: DEFER, url: url };
     })();
     </script>

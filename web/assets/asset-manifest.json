@@ -6,7 +6,7 @@
     "bridge": "5cd1cbc1ce",
     "cangshu-link": "d87df4f3cb",
     "config-sync": "7cbbcc1ecd",
-    "custom": "7f8b7f7807",
+    "custom": "54c27932cc",
     "extension": "ac2832ce10",
     "file-manager": "6d3d9fdb9e",
     "gesture": "4896dd831d",
@@ -19,8 +19,8 @@
     "share": "27afaa1375",
     "storage": "e360e26265",
     "task-dock": "b85747e5e4",
-    "theme": "89aafc792a",
-    "ui": "2a852b92c2",
-    "version": "8de8975ee1"
+    "theme": "b0ec742409",
+    "ui": "cff4cd9a0d",
+    "version": "f9c20dfe1d"
   }
 }

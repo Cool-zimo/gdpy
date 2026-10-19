@@ -99,6 +99,9 @@ class App {
             this.storage.setToken(token);
             this.storage.setUser(user);
             this.storage.addAccount(token, user);
+            // 换人登录 = 换一份干净数据。若这个账号名下还留着历史 bug
+            // 写进去的别的账号的仓名 / VFS，这里一并清掉，避免再次跨账号。
+            this.storage.clearAccountData((user && (user.login || user.id)) || token.substring(0, 8));
             // 同步给仓鼠（同源 localStorage 共享），让对面也是已登录状态
             this.syncTokenToBridge(token, user);
             // 确保当前账号 ID 已设置（addAccount 里已设置，这里双重保险）
@@ -109,31 +112,16 @@ class App {
             console.error('登录失败:', e);
             let errorMessage = '登录失败';
             if (e.status === 401) {
+                // 401 不一定是 token 坏了。多账号场景下更常见的是
+                // 「拿 A 的身份去写 B 的仓库」——token 本身完全有效。
+                // 一律说"token 无效"会把人引到重新申请令牌上，白折腾。
                 errorMessage = 'Token 无效或已过期，请检查并重试';
-            } else if (e.status === 403) {
-                // ★ 403 有两张完全不同的脸，混成一句"权限不足"害人不浅：
-                //   1) 真·权限不足 —— GitHub 会在 errors[].message 里说清缺什么
-                //   2) 限流        —— 同样是 403，message 含 "rate limit"，
-                //                    但跟权限毫无关系，等一会儿就好
-                //   用户反馈"我的 token 明明有权限却一直提示没权限"，
-                //   很可能就是限流被当成了权限问题（isRateLimit 已由
-                //   github-api 打标，这里优先按限流解释）。
-                if (e.isRateLimit) {
-                    errorMessage = 'GitHub API 限流（不是权限问题）：剩余 ' +
-                        (this.api?.rateLimit?.remaining ?? 0) + ' 次，请稍后重试';
-                } else {
-                    // github-api 已把 errors[].message 收进 e.errors，
-                    // 那是 GitHub 原话（例如 "Resource not accessible by
-                    // personal access token"），比我们猜的准。
-                    const why = (e.errors && e.errors.length)
-                        ? '（' + e.errors.join('；') + '）' : '';
-                    errorMessage = 'Token 权限不足' + why +
-                        '。请确认：classic token 勾选 repo+workflow；' +
-                        'fine-grained token 需授权全部目标仓库并给 Contents 读写';
+                const owner = this.storage.getUser()?.login;
+                if (owner) {
+                    errorMessage += `（当前身份 ${owner}；若刚切换过账号，也可能是仓库归属未同步，请到设置里重新同步仓库列表）`;
                 }
-            } else if (e.status === 0) {
-                // 桌面版专属：请求压根没发出去（域名不在白名单/网络失败/超时）
-                errorMessage = '请求未发出（不是权限问题）：' + (e.message || '未知原因');
+            } else if (e.status === 403) {
+                errorMessage = 'Token 权限不足，请确保拥有 repo 和 workflow 权限';
             } else if (e.message) {
                 errorMessage += `: ${e.message}`;
             }
@@ -321,7 +309,7 @@ class App {
         try { this.saveLastState(); } catch(e) {}
         // 严格数据隔离：切换账号前清除当前账号的所有本地缓存
         // 这样新账号会从远程重新读取 config，不会和旧账号数据混淆
-        this.storage.clearCurrentAccountData();
+        this.storage.clearAccountData(accountId);
         const account = this.storage.setCurrentAccount(accountId);
         if (account) {
             location.reload();
@@ -347,13 +335,47 @@ class App {
             const files = await this.fileManager.listFiles();
             this.currentFiles = files;
             this.ui.renderFileList(files);
+            // ★ 跨账号残留提示（v0.0.83）
+            //
+            //   这些条目是旧账号留在本地 VFS 里的索引，文件实体在别人仓库里，
+            //   打开/删除都会用当前 token 去打别人的仓 → 401。
+            //   不提示的话用户只会以为「token 坏了」，于是反复重申请令牌。
+            this._warnForeignFiles();
         } catch (e) {
             this.ui.showToast('加载文件失败: ' + e.message, 'error');
             document.getElementById('loading-state')?.classList.add('hidden');
         }
     }
 
-    async navigateTo(path) { 
+    /**
+     * ★ 跨账号残留提示（v0.0.83）
+     *
+     * 只提示、不自动删。这些条目背后的文件实体真实存在（在旧账号的仓库里），
+     * 一键清掉等于「我的文件凭空消失」。所以先告诉用户「是什么、为什么」，
+     * 清理动作由用户自己点。
+     */
+    async _warnForeignFiles() {
+        try {
+            if (!this.fileManager?.scanForeignFiles) return;
+            if (this._foreignWarned) return;
+            const { me, foreign } = await this.fileManager.scanForeignFiles();
+            if (!me || !foreign.length) return;
+            this._foreignWarned = true;
+
+            const owners = [...new Set(foreign.flatMap(f => f.owners))].join('、');
+            const names = foreign.slice(0, 3).map(f => f.name).join('、');
+            const more = foreign.length > 3 ? ` 等 ${foreign.length} 项` : '';
+            this.ui.showToast(
+                `有 ${foreign.length} 项属于 ${owners}（如 ${names}${more}），` +
+                `当前账号是 ${me}，打不开也删不掉。到设置 → 清理跨账号残留 可移除这些索引。`,
+                'warning', 12000);
+        } catch (e) {
+            // 扫描失败绝不能影响正常加载 —— 它不是主流程的一部分
+            console.warn('[App] 跨账号残留扫描失败:', e.message);
+        }
+    }
+
+    async navigateTo(path) {
         this.fileManager.setCurrentPath(path); 
         this.saveLastState();
         await this.loadFiles(); 
@@ -854,12 +876,17 @@ class App {
                 if (!rules) continue;
                 for (const r of rules) {
                     if (r.selectorText === '#gd-css-stamp') {
-                        gotVer = (r.style.getPropertyValue('--stamp') || '').trim().replace(/["']/g, '');
-                        gotApi = (r.style.getPropertyValue('--api-stamp') || '').trim().replace(/["']/g, '');
-                        break;
+                        // ★ 不再找到第一个就 break。
+                        //   --stamp 现在在 index.html 的内联 <style> 里，
+                        //   --api-stamp 在 css 文件里 —— 两者不在同一个样式表，
+                        //   遇到第一个就跳出会漏掉另一个，检测静默失效。
+                        const v = (r.style.getPropertyValue('--stamp') || '').trim().replace(/["']/g, '');
+                        const a = (r.style.getPropertyValue('--api-stamp') || '').trim().replace(/["']/g, '');
+                        if (v && !gotVer) gotVer = v;
+                        if (a && !gotApi) gotApi = a;
                     }
                 }
-                if (gotVer || gotApi) break;
+                if (gotVer && gotApi) break;
             }
 
             const problems = [];

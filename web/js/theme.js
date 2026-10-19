@@ -60,6 +60,84 @@
         return false;
     }
 
+    /* ---- WCAG 对比度兜底 ----
+       用户反馈过两轮"暗色下文字看不清"。前两轮都是靠"列举已知的硬编码颜色"
+       去补规则 —— 补一批漏一批，因为硬编码散落在上百处 CSS 类里，
+       而且以后新增组件还会继续漏。
+       这里改成按**实际渲染出来的对比度**判定，不管颜色是内联写的、
+       CSS 类写的还是 JS 生成的，只要不够亮就提亮。 */
+
+    function parseRGB(c) {
+        if (!c) return null;
+        var m = /rgba?\(([^)]+)\)/.exec(c);
+        if (!m) return null;
+        var p = m[1].split(',').map(Number);
+        if (p.length < 3) return null;
+        return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+    }
+
+    function lum(c) {
+        function f(v) {
+            v = v / 255;
+            return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+    }
+
+    function contrast(fg, bg) {
+        var l1 = lum(fg), l2 = lum(bg);
+        var hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+        return (hi + 0.05) / (lo + 0.05);
+    }
+
+    /* 向上找第一个不透明背景 —— 文字实际压在什么颜色上 */
+    function effectiveBg(el) {
+        var p = el, guard = 0;
+        while (p && p.nodeType === 1 && guard++ < 12) {
+            var cs;
+            try { cs = root.getComputedStyle(p); } catch (e) { break; }
+            if (cs) {
+                var c = parseRGB(cs.backgroundColor);
+                if (c && c.a >= 0.5) return c;
+            }
+            p = p.parentElement;
+        }
+        return { r: 13, g: 17, b: 23, a: 1 };   // 兜底按暗色底算
+    }
+
+    /* 只处理"自己带着文字"的元素。
+       遍历全部元素会给每个节点都触发一次样式计算，上千节点时明显卡顿，
+       而容器节点本身没有文字，改它的 color 也没意义。 */
+    function hasDirectText(el) {
+        var ns = el.childNodes;
+        for (var i = 0; i < ns.length; i++) {
+            if (ns[i].nodeType === 3 && ns[i].nodeValue.trim()) return true;
+        }
+        return false;
+    }
+
+    function fixContrast(el, cs) {
+        if (el.disabled) return;                       // 禁用态本来就该弱化
+        if (el.hasAttribute('data-gd-force')) return;  // 已有更强规则在管
+        var op = parseFloat(cs.opacity);
+        if (!isNaN(op) && op < 0.5) return;            // 刻意淡出的不动
+        var fg = parseRGB(cs.color);
+        if (!fg || fg.a < 0.05) return;
+        var bg = effectiveBg(el);
+        // ★ 彩色背景（按钮、标签、徽章）一律不碰。
+        //   它们的配色是设计决定的，而对比度算法只会说"把字改暗"——
+        //   那会把蓝底白字的按钮改成蓝底灰字，更难看。
+        //   这类元素该改的是底色，已由 CSS 里的规则专门处理。
+        var mx = Math.max(bg.r, bg.g, bg.b), mn = Math.min(bg.r, bg.g, bg.b);
+        if (mx - mn > 40) return;
+        if (contrast(fg, bg) >= 4.5) return;           // WCAG AA 正文标准
+        // 原本越暗说明它越想当"主文字"，就提得越亮，保留层次
+        el.style.setProperty('color',
+            lum(fg) < 0.2 ? 'var(--text-primary)' : 'var(--text-secondary)',
+            'important');
+        el.setAttribute('data-gd-fixed', '1');
+    }
+
     function fixElement(el) {
         if (!el || el.nodeType !== 1) return;
         if (isProtected(el)) return;
@@ -76,6 +154,8 @@
         if (inline && /#111827|#1f2328|#111|#374151|rgb\(17, 24, 39\)/i.test(inline)) {
             el.setAttribute('data-gd-force', 'title');
         }
+        // 对比度兜底：不看颜色是怎么来的，只看实际渲染够不够亮
+        if (hasDirectText(el)) fixContrast(el, cs);
     }
 
     /* 给已知的内联硬编码标题打标记（这些是用户明确点名看不清的） */

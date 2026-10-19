@@ -197,8 +197,46 @@ class ConfigSync {
 
     /**
      * 从远程配置恢复到本地
+     *
+     * ★ 归属过滤（v0.0.87）
+     *
+     *   远端 config 里可能混着别的账号的文件索引 —— 历史迁移 bug 把它们
+     *   一并同步到了 github-drive-config/config.json。不过滤的话：
+     *
+     *       本地清理 → 刷新 → 从远端拉回 → 脏数据复活 → 又提示
+     *
+     *   本地清多少次都没用，因为源头在远端。这正是「清理完还是提示」的根因。
+     *
+     *   只剔除 chunks.owner【明确不属于本账号】的条目；owner 缺失的老数据
+     *   一律保留 —— 宁可留着，绝不误删。远端数据不动，随时可恢复。
      */
     restoreConfig(config) {
+        const me = this.owner || null;
+        let skippedFiles = 0, skippedRepos = 0;
+
+        if (config.fileIndex && config.fileIndex.files && me) {
+            const files = {};
+            for (const [path, info] of Object.entries(config.fileIndex.files)) {
+                const owners = [...new Set((info.chunks || []).map(c => c.owner).filter(Boolean))];
+                // 必须"有 owner 且全部都不是我"才剔除；空 owner / 混合 owner 保留
+                if (owners.length && owners.every(o => o !== me)) { skippedFiles++; continue; }
+                files[path] = info;
+            }
+            config.fileIndex = Object.assign({}, config.fileIndex, { files });
+        }
+
+        if (Array.isArray(config.repos) && me) {
+            const kept = config.repos.filter(r => !r || !r.owner || r.owner === me);
+            skippedRepos = config.repos.length - kept.length;
+            config.repos = kept;
+        }
+
+        if (skippedFiles || skippedRepos) {
+            console.warn(
+                `[ConfigSync] 远端配置里有 ${skippedFiles} 个文件、${skippedRepos} 个仓库` +
+                `不属于 ${me}，已跳过。远端未改动，文件实体仍在原账号的仓库里。`);
+        }
+
         if (config.repos) this.storage.set(this.storage.keys.REPOS, config.repos);
         if (config.fileIndex) this.storage.setVFS(config.fileIndex);
         if (config.starred) this.storage.set(this.storage.keys.FAVORITES, config.starred);
@@ -209,6 +247,7 @@ class ConfigSync {
 
         // 更新最后同步的 hash
         this.lastSyncHash = this.hashCode(JSON.stringify(config, null, 2));
+        return { skippedFiles, skippedRepos, me };
     }
 
     /**

@@ -1,7 +1,7 @@
 const APP_VERSION = {
-    internalVersion: '79',
-    formalVersion: '0.0.79',
-    displayVersion: 'v0.0.79',
+    internalVersion: '87',
+    formalVersion: '0.0.87',
+    displayVersion: 'v0.0.87',
     //   = 1：契约体系建立。移除侧边栏 nav-group 折叠结构。
     //   = 2：侧边栏图标从 emoji 换成 <img src="assets/icons/...">。
     //        HTML 结构变了（nav-icon 内新增 img 节点），CSS 也新增了
@@ -29,5 +29,17 @@ const APP_VERSION = {
     //        同时给仪表盘加 .dash-card / .dash-num[data-count]。
     //        老 CSS 没有 gd-ripple 规则 → 涟漪会是一个不透明的实心色块
     //        盖在按钮上；没有 dash-card → 仪表盘卡片没有入场动画。
+    //
+    //   = 7 期间的加载改造（v0.0.87，不涉及契约变化，故不 bump）：
+    //       - index.html 里 15 个 CORE 脚本从 document.write 改成静态
+    //         <script defer>，CSS 也改成静态 <link>。目的是让浏览器的
+    //         预加载扫描器能看见它们 —— 原来 URL 是 JS 运行时拼的，
+    //         扫描器不执行 JS，必须等 HTML 下载完才开始请求，白等 RTT。
+    //       - CSS 的 URL 从 ?v=N 改成 ?h=<内容 hash>；--stamp 移到
+    //         index.html 的内联 <style>，否则它每轮都变，会把 CSS 的
+    //         内容 hash 也带着变，样式表每次升级都要重新下载。
+    //       - app.js 的版本戳读取改为跨样式表累加：--stamp 在内联、
+    //         --api-stamp 在 css 文件，原来遇到第一个就 break 会漏掉
+    //         另一个。CSS 无依赖，故不 bump api。
     apiVersion: '7'
 };

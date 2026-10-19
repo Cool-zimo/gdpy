@@ -144,6 +144,15 @@
             if (!el) return;
             el.hidden = !!cfg.barHidden[b[0]];
         });
+        // ★ 改完用户勾选后必须让 ui 重新按视图校正一次。
+        //   否则在非文件视图下把「视图切换」勾上，它会立刻冒出来 ——
+        //   用户勾的是"我要它显示"，不是"无视当前视图强行显示"。
+        try {
+            var ui = root.ui;
+            if (ui && ui._syncToolbarForView && ui.app && ui.app._currentView) {
+                ui._syncToolbarForView(ui.app._currentView);
+            }
+        } catch (e) { /* ui 还没起来就算了 */ }
     }
 
     /* ---------- 应用：外观 ---------- */

@@ -1484,6 +1484,61 @@ class UI {
                 window.GdCustom.bindLook(host);
             }
         } catch (e) { /* 设置页不能因为外观控件挂掉 */ }
+        this._renderForeignSection(fileList);
+    }
+
+    /**
+     * ★ 跨账号残留清理入口（v0.0.83）
+     *
+     * VFS 里可能留着旧账号的文件索引（切号、迁移没清干净的结果）。
+     * 它们看得见、点得动，但一操作就拿当前 token 去打别人的仓库 → 401。
+     *
+     * 这里只删【本地索引】，不动远端文件 —— 文件实体仍在原账号的仓库里。
+     * 之所以不自动清：用户看到"我的文件消失"会以为数据丢了，
+     * 而这实际上只是把不属于本账号的指针摘掉。
+     */
+    async _renderForeignSection(fileList) {
+        try {
+            const fm = this.app?.fileManager;
+            if (!fm?.scanForeignFiles) return;
+            const { me, foreign } = await fm.scanForeignFiles();
+            if (!me || !foreign.length) return;
+
+            const owners = [...new Set(foreign.flatMap(f => f.owners))].join('、');
+            const card = document.createElement('div');
+            card.style.cssText =
+                'margin-top:20px;padding:14px 16px;border-radius:12px;' +
+                'border:1px solid var(--border-color,#d0d7de);background:var(--bg-secondary,#f6f8fa);';
+            card.innerHTML =
+                '<div style="font-size:14px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">'
+              + '⚠️ 跨账号残留 ' + foreign.length + ' 项</div>'
+              + '<div style="font-size:12px;color:var(--text-secondary);line-height:1.7;margin-bottom:10px;">'
+              + '这些文件属于 <b>' + owners + '</b>，当前登录的是 <b>' + me + '</b>。<br>'
+              + '它们能看见但打不开也删不掉 —— 操作会拿当前令牌去访问别人的仓库，必然失败。<br>'
+              + '清理只会移除本机的索引，<b>不会删除 ' + owners + ' 仓库里的实际文件</b>。'
+              + '</div>'
+              + '<button id="gd-purge-foreign" style="padding:7px 14px;border-radius:8px;border:none;'
+              + 'background:#cf222e;color:#fff;font-size:13px;cursor:pointer;">清理这些索引</button>'
+              + '<span id="gd-purge-msg" style="margin-left:10px;font-size:12px;color:var(--text-secondary);"></span>';
+            fileList.firstChild?.appendChild(card);
+
+            card.querySelector('#gd-purge-foreign').addEventListener('click', async () => {
+                const msg = card.querySelector('#gd-purge-msg');
+                if (!confirm('将移除 ' + foreign.length + ' 项索引（不影响远端文件）。确定继续？')) return;
+                try {
+                    const r = await fm.purgeForeignFiles();
+                    msg.textContent = '已清理 ' + r.removed + ' 项，正在同步…';
+                    // ★ 必须推到远端。远端 config.json 里也存着这些索引，
+                    //   只清本地的话刷新一次就从远端原样恢复了 —— 白清。
+                    try { await this.app.configSync?.pushConfig?.(); } catch (e) { /* 稍后自动同步 */ }
+                    setTimeout(() => { this.app.loadFiles(); }, 600);
+                } catch (e) {
+                    msg.textContent = '清理失败: ' + e.message;
+                }
+            });
+        } catch (e) {
+            console.warn('[UI] 跨账号残留区块渲染失败:', e.message);
+        }
     }
 
     /**
@@ -1667,21 +1722,33 @@ class UI {
 
     /** 主窗口渲染后台进程 */
     /**
-     * 顶栏常驻后，按视图同步按钮可用态。
-     * 直接隐藏会造成"点了没反应"，所以改成置灰 + 提示。
-     * 用户自己在右键菜单里勾掉的项（hidden）不受影响。
+     * 顶栏常驻后，按视图同步按钮显隐。
+     *
+     * ★ 用隐藏，不用置灰（v0.0.80 改）。
+     *   上一版写的是 disabled + opacity:.38，理由是"隐藏会造成点了没反应"。
+     *   这个理由是反的：按钮还在但按下去不动，才是真的"点了没反应"；
+     *   根本看不见的按钮，用户压根不会去点。而且三个半透明按钮杵在那里，
+     *   视觉上像"界面坏了"，比没有更糟。
+     *
+     * ★ 必须和用户自己的勾选（custom.js 的 cfg.barHidden）合并判断，
+     *   不能直接写 el.hidden = !isFiles ——
+     *   那样切回文件视图时会把用户主动勾掉的项又显示出来。
      */
     _syncToolbarForView(view) {
         const isFiles = (view === 'all-files');
-        // 只依赖当前文件列表上下文的按钮
+        // 只在文件列表语境下才有意义的按钮
         const FILE_ONLY = ['#adv-search-btn', '#folder-tree-btn', '#view-toggle-btn'];
         FILE_ONLY.forEach(sel => {
             const el = document.querySelector('.toolbar ' + sel)
                     || document.querySelector(sel);
             if (!el) return;
-            el.disabled = !isFiles;
-            el.classList.toggle('gd-bar-off', !isFiles);
-            el.title = isFiles ? '' : '切换到「全部文件」后可用';
+            const userOff = (window.GdCustom && window.GdCustom.get)
+                ? !!window.GdCustom.get().barHidden[sel]
+                : false;
+            el.hidden = userOff || !isFiles;
+            // 清掉上一版留下的置灰态，否则切回来还是灰的
+            el.disabled = false;
+            el.classList.remove('gd-bar-off');
         });
     }
 
@@ -2593,8 +2660,26 @@ class UI {
         } catch (e) { /* 清单拿不到就只用 API 结果 */ }
 
         const meta = new Map();
+        // ★★ 清单里的分支名同样要过 _safeBranch —— 这一处曾经漏掉。
+        //
+        //   preview-branches.json 是任何人提 PR 都能改的文件（见
+        //   test_plaza_xss）。API 那条路径早就过滤了，唯独清单这条
+        //   只判了 typeof === 'string' 就 set 进 meta，于是恶意分支名
+        //   绕过白名单直接进列表。
+        //
+        //   loadVersion/switchBranch 都有校验（点到会被拦），所以不是
+        //   注入漏洞；但一个带引号和 // 的怪分支名出现在列表里，用户
+        //   会当成真版本去点 —— 过滤比转义更靠前一步。
+        //
+        //   ★ 更要紧的是这处修复被上游同步覆盖过一次：v79 修好 → v83~v87
+        //     的 ui.js 直接覆盖文件 → 漏洞悄悄回来。test_plaza_xss 那两条
+        //     断言就是防这个的，同步后跑测试能立刻发现。
         for (const b of (manifest.branches || [])) {
-            if (b && typeof b.branch === 'string') meta.set(b.branch, b);
+            if (b && typeof b.branch === 'string') {
+                const sb = this._safeBranch(b.branch);
+                if (!sb) continue;
+                meta.set(sb, b);
+            }
         }
 
         // ── 用 API 列出真实存在的 preview/* 分支 ──
@@ -2669,16 +2754,10 @@ class UI {
 
         const q = (this._vsFilter || '').trim().toLowerCase();
         let list = this._vsList.filter(b =>
-            // ★ 纵深防御：清单来自 PR 可控的 preview-branches.json，
-            //   渲染处虽然已经逐字段 esc() 转义（所以不构成 XSS），
-            //   但不合法的名字本来就不该出现在列表里 ——
-            //   一个 "preview/x');fetch(...)//" 出现在界面上，
-            //   用户会以为是真版本而点它。过滤比转义更靠前一步。
-            !!this._safeBranch(b.branch) &&
-            (!q || b.branch.toLowerCase().includes(q) ||
+            !q || b.branch.toLowerCase().includes(q) ||
             (b.name || '').toLowerCase().includes(q) ||
             (b.author || '').toLowerCase().includes(q) ||
-            (b.description || '').toLowerCase().includes(q)));
+            (b.description || '').toLowerCase().includes(q));
 
         const sort = this._vsSort || 'time';
         list.sort((a, b) => {
